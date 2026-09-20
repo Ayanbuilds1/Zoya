@@ -22,22 +22,17 @@ class GroqService(AIProvider):
         message: str,
         conversation_history: list[dict[str, str]] | None = None,
     ) -> str:
-        response = self.client.chat.completions.create(
+                response = self.client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=build_chat_messages(
-                message,
-                conversation_history=conversation_history,
-            ),
+            messages=build_chat_messages(message),
+            max_tokens=2048,
         )
-
-        content = response.choices[0].message.content
-
-        if not content:
-            raise RuntimeError(
+                content = response.choices[0].message.content
+                if not content:
+                     raise RuntimeError(
                 "Groq returned an empty response."
             )
-
-        return content
+                return content
 
     def stream_message(
         self,
@@ -46,10 +41,8 @@ class GroqService(AIProvider):
     ) -> Iterator[str]:
         stream = self.client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=build_chat_messages(
-                message,
-                conversation_history=conversation_history,
-            ),
+            messages=build_chat_messages(message),
+            max_tokens=2048,
             stream=True,
         )
 

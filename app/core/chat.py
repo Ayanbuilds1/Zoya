@@ -1,24 +1,42 @@
+from __future__ import annotations
+
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
 from app.core.ai import create_ai_provider
-from app.core.brain import ZoyaBrain
+from app.core.brain import (
+    BrainDecision,
+    ZoyaBrain,
+)
 from app.core.intent import ZoyaIntentRouter
 from app.memory.extractor import MemoryExtractor
 from app.memory.manager import MemoryManager
-from app.research.orchestrator import ResearchOrchestrator
+from app.research.orchestrator import (
+    ResearchOrchestrator,
+)
 
 
 class ZoyaChatService:
     """
     Shared Zoya chat service for web/API interfaces.
+
+    Handles:
+    - persistent users
+    - conversations
+    - long-term memory extraction
+    - recent conversation context
+    - deterministic high-confidence intent routing
+    - semantic Brain reasoning
+    - research orchestration
+    - AI provider failover
+    - assistant message persistence
     """
 
-    MAX_HISTORY_CONTEXT_CHARS = 4500
-    MAX_MEMORY_CONTEXT_CHARS = 2500
-    MAX_RESEARCH_CONTEXT_CHARS = 8500
-    MAX_RESEARCH_SOURCE_CONTENT_CHARS = 700
+    MAX_HISTORY_CONTEXT_CHARS = 3200
+    MAX_MEMORY_CONTEXT_CHARS = 2200
+    MAX_RESEARCH_CONTEXT_CHARS = 5200
+    MAX_RESEARCH_SOURCE_CONTENT_CHARS = 500
 
     def __init__(self) -> None:
         self.ai = create_ai_provider()
@@ -26,7 +44,10 @@ class ZoyaChatService:
         self.extractor = MemoryExtractor()
 
         self.intent_router = ZoyaIntentRouter()
-        self.brain = ZoyaBrain()
+
+        self.brain = ZoyaBrain(
+            ai_provider=self.ai,
+        )
 
         self.research = ResearchOrchestrator(
             ai_provider=self.ai,
@@ -42,17 +63,31 @@ class ZoyaChatService:
         if not history:
             return []
 
-        compacted_reversed: list[dict[str, str]] = []
+        compacted_reversed: list[
+            dict[str, str]
+        ] = []
+
         used_chars = 0
 
         for item in reversed(history):
-            role = item.get("role")
-            content = item.get("content")
+            role = item.get(
+                "role"
+            )
 
-            if role not in {"user", "assistant"}:
+            content = item.get(
+                "content"
+            )
+
+            if role not in {
+                "user",
+                "assistant",
+            }:
                 continue
 
-            if not isinstance(content, str):
+            if not isinstance(
+                content,
+                str,
+            ):
                 continue
 
             content = content.strip()
@@ -60,12 +95,18 @@ class ZoyaChatService:
             if not content:
                 continue
 
-            remaining = max_chars - used_chars
+            remaining = (
+                max_chars
+                - used_chars
+            )
 
             if remaining <= 0:
                 break
 
-            item_limit = min(1400, remaining)
+            item_limit = min(
+                1400,
+                remaining,
+            )
 
             if len(content) > item_limit:
                 content = (
@@ -80,7 +121,9 @@ class ZoyaChatService:
                 }
             )
 
-            used_chars += len(content)
+            used_chars += len(
+                content
+            )
 
         compacted_reversed.reverse()
 
@@ -102,7 +145,9 @@ class ZoyaChatService:
         used_chars = 0
 
         for item in stored_memories:
-            line = f"- {item.key}: {item.value}"
+            line = (
+                f"- {item.key}: {item.value}"
+            )
 
             remaining = (
                 self.MAX_MEMORY_CONTEXT_CHARS
@@ -118,7 +163,10 @@ class ZoyaChatService:
             lines.append(line)
             used_chars += len(line)
 
-        return "\n".join(lines) or "(No stored memories.)"
+        return (
+            "\n".join(lines)
+            or "(No stored memories.)"
+        )
 
     def _build_research_context(
         self,
@@ -142,7 +190,10 @@ class ZoyaChatService:
                 "Never invent a source."
             ),
             "",
-            f"Research question: {research_result.query}",
+            (
+                f"Research question: "
+                f"{research_result.query}"
+            ),
             "",
         ]
 
@@ -175,7 +226,9 @@ class ZoyaChatService:
                 "",
             ]
 
-            block = "\n".join(block_lines)
+            block = "\n".join(
+                block_lines
+            )
 
             if (
                 used_chars + len(block)
@@ -183,12 +236,19 @@ class ZoyaChatService:
             ):
                 break
 
-            lines.extend(block_lines)
-            used_chars += len(block)
+            lines.extend(
+                block_lines
+            )
 
-        return "\n".join(lines)
+            used_chars += len(
+                block
+            )
 
-    def _prepare_chat_context(
+        return "\n".join(
+            lines
+        )
+
+    async def _prepare_chat_context(
         self,
         user_id: int,
         user_name: str,
@@ -199,8 +259,21 @@ class ZoyaChatService:
         str,
         list[dict[str, str]],
         str | None,
-        bool,
+        BrainDecision,
     ]:
+        """
+        Prepare user, conversation, context, routing, and Brain analysis.
+
+        Returns:
+            (
+                conversation_id,
+                current message,
+                compact conversation history,
+                direct response if already handled,
+                semantic Brain decision,
+            )
+        """
+
         message = message.strip()
 
         if not message:
@@ -214,13 +287,17 @@ class ZoyaChatService:
         )
 
         if conversation_id is None:
-            conversation_id = self.active_sessions.get(
-                user_id
+            conversation_id = (
+                self.active_sessions.get(
+                    user_id
+                )
             )
 
         if conversation_id is None:
-            conversation = self.memory.create_conversation(
-                user_id=user_id,
+            conversation = (
+                self.memory.create_conversation(
+                    user_id=user_id,
+                )
             )
 
             conversation_id = (
@@ -231,9 +308,12 @@ class ZoyaChatService:
                 conversation_id
             )
 
-        recent_messages = self.memory.get_recent_messages(
-            conversation_id=conversation_id,
-            limit=10,
+        # Read previous messages before saving the current message.
+        recent_messages = (
+            self.memory.get_recent_messages(
+                conversation_id=conversation_id,
+                limit=10,
+            )
         )
 
         full_conversation_history = [
@@ -242,33 +322,25 @@ class ZoyaChatService:
                 "content": item.content,
             }
             for item in recent_messages
-            if item.role in {"user", "assistant"}
+            if item.role in {
+                "user",
+                "assistant",
+            }
         ]
 
-        intent_decision = self.intent_router.classify(
-            message=message,
-            conversation_history=full_conversation_history,
-        )
-
-        response_plan = self.brain.plan(
-            message=message,
-            conversation_history=full_conversation_history,
-        )
-
-        response_instruction = (
-            self.brain.build_instruction(
-                response_plan
+        # ---------------------------------------------------------
+        # High-confidence deterministic routing
+        # ---------------------------------------------------------
+        intent_decision = (
+            self.intent_router.classify(
+                message=message,
+                conversation_history=(
+                    full_conversation_history
+                ),
             )
         )
 
-        needs_research = bool(
-            getattr(
-                response_plan,
-                "needs_current_information",
-                False,
-            )
-        )
-
+        # Save current user message.
         self.memory.save_message(
             conversation_id=conversation_id,
             user_id=user_id,
@@ -276,8 +348,11 @@ class ZoyaChatService:
             content=message,
         )
 
-        extracted_memories = self.extractor.extract(
-            message
+        # Extract long-term memories.
+        extracted_memories = (
+            self.extractor.extract(
+                message
+            )
         )
 
         for item in extracted_memories:
@@ -291,48 +366,101 @@ class ZoyaChatService:
                 source=item["source"],
             )
 
-        compact_history = self._compact_history(
-            full_conversation_history,
-            self.MAX_HISTORY_CONTEXT_CHARS,
+        compact_history = (
+            self._compact_history(
+                full_conversation_history,
+                self.MAX_HISTORY_CONTEXT_CHARS,
+            )
         )
 
+        # If the deterministic router already handled this action,
+        # do not spend an additional LLM call on Brain reasoning.
         if intent_decision.handled:
+            fallback_plan = self.brain.plan(
+                message=message,
+                conversation_history=(
+                    full_conversation_history
+                ),
+            )
+
+            direct_decision = BrainDecision(
+                intent="deterministic_action",
+                user_goal="Execute the requested supported action.",
+                interpreted_request=message,
+                research_needed=False,
+                research_query="",
+                needs_clarification=False,
+                clarification_question="",
+                confidence="high",
+                used_conversation_context=bool(
+                    full_conversation_history
+                ),
+                response_plan=fallback_plan,
+            )
+
             return (
                 conversation_id,
                 message,
                 compact_history,
                 intent_decision.response,
-                False,
+                direct_decision,
             )
+
+        # ---------------------------------------------------------
+        # Semantic AI Brain
+        # ---------------------------------------------------------
+        brain_decision = (
+            await self.brain.analyze(
+                message=message,
+                conversation_history=(
+                    full_conversation_history
+                ),
+            )
+        )
 
         return (
             conversation_id,
-            response_instruction,
+            message,
             compact_history,
             None,
-            needs_research,
+            brain_decision,
         )
 
     def _build_contextual_message(
         self,
-        response_instruction: str,
+        brain_decision: BrainDecision,
         message: str,
         user_id: int,
         research_result: Any | None = None,
-        research_required: bool = False,
     ) -> str:
-        memory_context = self._build_memory_context(
-            user_id
+        memory_context = (
+            self._build_memory_context(
+                user_id
+            )
+        )
+
+        brain_instruction = (
+            self.brain.build_reasoning_instruction(
+                brain_decision
+            )
+        )
+
+        response_instruction = (
+            self.brain.build_instruction(
+                brain_decision.response_plan
+            )
         )
 
         parts = [
+            brain_instruction,
+            "",
             response_instruction,
             "",
             "Persistent memories about Ayan:",
             memory_context,
         ]
 
-        if research_required:
+        if brain_decision.research_needed:
             if research_result is not None:
                 parts.extend(
                     [
@@ -348,9 +476,9 @@ class ZoyaChatService:
                         "",
                         "CURRENT INFORMATION NOTICE:",
                         (
-                            "This request requires current web "
-                            "information, but no usable research "
-                            "result is available."
+                            "This request requires current or "
+                            "externally verified information, but "
+                            "no usable research result is available."
                         ),
                         (
                             "Do not invent current facts, sources, "
@@ -368,7 +496,9 @@ class ZoyaChatService:
             ]
         )
 
-        return "\n".join(parts)
+        return "\n".join(
+            parts
+        )
 
     async def _run_research(
         self,
@@ -390,11 +520,11 @@ class ZoyaChatService:
     ) -> dict:
         (
             conversation_id,
-            response_instruction,
+            current_message,
             conversation_history,
             direct_response,
-            needs_research,
-        ) = self._prepare_chat_context(
+            brain_decision,
+        ) = await self._prepare_chat_context(
             user_id=user_id,
             user_name=user_name,
             message=message,
@@ -403,36 +533,59 @@ class ZoyaChatService:
 
         if direct_response is not None:
             reply = direct_response
-            active_provider = "intent-router"
+            active_provider = (
+                "intent-router"
+            )
+
+        elif brain_decision.needs_clarification:
+            reply = (
+                brain_decision.clarification_question
+                or "Aap thoda aur context bataiye."
+            )
+
+            active_provider = (
+                "brain-clarification"
+            )
 
         else:
             research_result = None
 
-            if needs_research:
+            if brain_decision.research_needed:
                 try:
+                    research_query = (
+                        brain_decision.research_query
+                        or brain_decision.interpreted_request
+                        or current_message
+                    )
+
                     research_result = (
                         await self._run_research(
-                            message,
+                            research_query,
                             emit=None,
                         )
                     )
+
                 except Exception as error:
                     print(
                         "\n⚠️ NON-STREAM RESEARCH ERROR"
                     )
+
                     print(
-                        f"Error type: {type(error).__name__}"
+                        f"Error type: "
+                        f"{type(error).__name__}"
                     )
+
                     print(
                         f"Error message: {error}"
                     )
 
-            ai_message = self._build_contextual_message(
-                response_instruction=response_instruction,
-                message=message,
-                user_id=user_id,
-                research_result=research_result,
-                research_required=needs_research,
+            ai_message = (
+                self._build_contextual_message(
+                    brain_decision=brain_decision,
+                    message=current_message,
+                    user_id=user_id,
+                    research_result=research_result,
+                )
             )
 
             reply = await asyncio.to_thread(
@@ -441,7 +594,9 @@ class ZoyaChatService:
                 conversation_history,
             )
 
-            active_provider = self.ai.active_provider
+            active_provider = (
+                self.ai.active_provider
+            )
 
         self.memory.save_message(
             conversation_id=conversation_id,
@@ -462,14 +617,16 @@ class ZoyaChatService:
         user_name: str,
         message: str,
         conversation_id: int | None = None,
-    ) -> AsyncIterator[dict[str, Any]]:
+    ) -> AsyncIterator[
+        dict[str, Any]
+    ]:
         (
             conversation_id,
-            response_instruction,
+            current_message,
             conversation_history,
             direct_response,
-            needs_research,
-        ) = self._prepare_chat_context(
+            brain_decision,
+        ) = await self._prepare_chat_context(
             user_id=user_id,
             user_name=user_name,
             message=message,
@@ -494,7 +651,41 @@ class ZoyaChatService:
             yield {
                 "event": "done",
                 "data": {
-                    "active_provider": "intent-router",
+                    "active_provider": (
+                        "intent-router"
+                    ),
+                    "research": None,
+                },
+            }
+
+            return
+
+        if brain_decision.needs_clarification:
+            clarification = (
+                brain_decision.clarification_question
+                or "Aap thoda aur context bataiye."
+            )
+
+            self.memory.save_message(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                role="assistant",
+                content=clarification,
+            )
+
+            yield {
+                "event": "chunk",
+                "data": {
+                    "content": clarification,
+                },
+            }
+
+            yield {
+                "event": "done",
+                "data": {
+                    "active_provider": (
+                        "brain-clarification"
+                    ),
                     "research": None,
                 },
             }
@@ -503,7 +694,7 @@ class ZoyaChatService:
 
         research_result = None
 
-        if needs_research:
+        if brain_decision.research_needed:
             research_queue: asyncio.Queue[
                 tuple[str, dict[str, Any]]
             ] = asyncio.Queue()
@@ -519,9 +710,15 @@ class ZoyaChatService:
                     )
                 )
 
+            research_query = (
+                brain_decision.research_query
+                or brain_decision.interpreted_request
+                or current_message
+            )
+
             research_task = asyncio.create_task(
                 self._run_research(
-                    message.strip(),
+                    research_query,
                     emit=emit_research_event,
                 )
             )
@@ -531,16 +728,22 @@ class ZoyaChatService:
                     if research_task.done():
                         break
 
-                    queue_task = asyncio.create_task(
-                        research_queue.get()
+                    queue_task = (
+                        asyncio.create_task(
+                            research_queue.get()
+                        )
                     )
 
-                    done, pending = await asyncio.wait(
-                        {
-                            queue_task,
-                            research_task,
-                        },
-                        return_when=asyncio.FIRST_COMPLETED,
+                    done, pending = (
+                        await asyncio.wait(
+                            {
+                                queue_task,
+                                research_task,
+                            },
+                            return_when=(
+                                asyncio.FIRST_COMPLETED
+                            ),
+                        )
                     )
 
                     if queue_task in done:
@@ -570,9 +773,12 @@ class ZoyaChatService:
                     print(
                         "\n⚠️ STREAM RESEARCH ERROR"
                     )
+
                     print(
-                        f"Error type: {type(error).__name__}"
+                        f"Error type: "
+                        f"{type(error).__name__}"
                     )
+
                     print(
                         f"Error message: {error}"
                     )
@@ -601,12 +807,13 @@ class ZoyaChatService:
                 if not research_task.done():
                     research_task.cancel()
 
-        ai_message = self._build_contextual_message(
-            response_instruction=response_instruction,
-            message=message.strip(),
-            user_id=user_id,
-            research_result=research_result,
-            research_required=needs_research,
+        ai_message = (
+            self._build_contextual_message(
+                brain_decision=brain_decision,
+                message=current_message,
+                user_id=user_id,
+                research_result=research_result,
+            )
         )
 
         loop = asyncio.get_running_loop()
@@ -637,8 +844,12 @@ class ZoyaChatService:
                     loop,
                 ).result()
 
-        producer_task = asyncio.create_task(
-            asyncio.to_thread(produce)
+        producer_task = (
+            asyncio.create_task(
+                asyncio.to_thread(
+                    produce
+                )
+            )
         )
 
         chunks: list[str] = []
@@ -650,7 +861,10 @@ class ZoyaChatService:
                 if item is None:
                     break
 
-                if isinstance(item, Exception):
+                if isinstance(
+                    item,
+                    Exception,
+                ):
                     raise item
 
                 chunks.append(item)
@@ -665,7 +879,9 @@ class ZoyaChatService:
         finally:
             await producer_task
 
-        reply = "".join(chunks).strip()
+        reply = "".join(
+            chunks
+        ).strip()
 
         if not reply:
             raise RuntimeError(
@@ -706,7 +922,9 @@ class ZoyaChatService:
         yield {
             "event": "done",
             "data": {
-                "active_provider": self.ai.active_provider,
+                "active_provider": (
+                    self.ai.active_provider
+                ),
                 "research": research_summary,
             },
         }
@@ -718,11 +936,13 @@ class ZoyaChatService:
         message: str,
         conversation_id: int | None = None,
     ) -> AsyncIterator[str]:
-        async for event in self.stream_chat_events(
-            user_id=user_id,
-            user_name=user_name,
-            message=message,
-            conversation_id=conversation_id,
+        async for event in (
+            self.stream_chat_events(
+                user_id=user_id,
+                user_name=user_name,
+                message=message,
+                conversation_id=conversation_id,
+            )
         ):
             if event["event"] == "chunk":
                 content = event["data"].get(
@@ -737,7 +957,9 @@ class ZoyaChatService:
         self,
         user_id: int,
     ) -> int | None:
-        return self.active_sessions.get(user_id)
+        return self.active_sessions.get(
+            user_id
+        )
 
     def get_conversation_history(
         self,
@@ -746,8 +968,10 @@ class ZoyaChatService:
         limit: int = 100,
     ) -> dict:
         if conversation_id is None:
-            conversation_id = self.active_sessions.get(
-                user_id
+            conversation_id = (
+                self.active_sessions.get(
+                    user_id
+                )
             )
 
         if conversation_id is None:
@@ -756,9 +980,11 @@ class ZoyaChatService:
                 "messages": [],
             }
 
-        messages = self.memory.get_recent_messages(
-            conversation_id=conversation_id,
-            limit=limit,
+        messages = (
+            self.memory.get_recent_messages(
+                conversation_id=conversation_id,
+                limit=limit,
+            )
         )
 
         history = [
@@ -767,7 +993,10 @@ class ZoyaChatService:
                 "content": item.content,
             }
             for item in messages
-            if item.role in {"user", "assistant"}
+            if item.role in {
+                "user",
+                "assistant",
+            }
         ]
 
         return {
