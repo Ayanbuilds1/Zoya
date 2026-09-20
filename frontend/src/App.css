@@ -2166,3 +2166,703 @@ button {
     transition-duration: 0.01ms !important;
   }
 }
+/* =========================================================
+   ZOYA RESEARCH EXPERIENCE
+   ========================================================= */
+
+.research-activity {
+  width: fit-content;
+  max-width: 520px;
+  margin: 8px 0 16px 46px;
+  animation: researchFadeIn 280ms ease-out;
+}
+
+.research-activity-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.research-spinner {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  border: 1.5px solid rgba(255, 255, 255, 0.22);
+  border-top-color: rgba(255, 255, 255, 0.9);
+  border-radius: 50%;
+  animation: researchSpin 850ms linear infinite;
+}
+
+.research-activity-title {
+  font-size: 13px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.research-activity-detail {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.46);
+}
+
+.research-summary-wrapper {
+  width: fit-content;
+  max-width: 100%;
+  margin: 8px 0 18px 46px;
+  animation: researchFadeIn 250ms ease-out;
+}
+
+.research-summary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: none;
+  padding: 3px 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 160ms ease;
+}
+
+.research-summary-button:hover {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.research-worked-time {
+  color: rgba(255, 255, 255, 0.34);
+}
+
+.research-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  transition: transform 180ms ease;
+}
+
+.research-chevron.open {
+  transform: rotate(180deg);
+}
+
+.research-sources-dropdown {
+  display: grid;
+  gap: 5px;
+  width: min(520px, calc(100vw - 90px));
+  max-height: 260px;
+  margin-top: 8px;
+  padding: 7px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+  animation: sourceDropIn 180ms ease-out;
+}
+
+.research-source-link {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 9px;
+  border-radius: 8px;
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.025);
+  transition: background 160ms ease;
+}
+
+.research-source-link:hover {
+  background: rgba(255, 255, 255, 0.065);
+}
+
+.research-source-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.research-source-domain {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.34);
+  font-size: 10px;
+}
+
+/* MESSAGE ACTIONS */
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.message-row.assistant:hover .message-actions {
+  opacity: 1;
+}
+
+.message-action-button {
+  border: none;
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.message-action-button:hover {
+  background: rgba(255, 255, 255, 0.055);
+  color: rgba(255, 255, 255, 0.78);
+}
+
+/* ANIMATIONS */
+
+@keyframes researchSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes researchFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sourceDropIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 700px) {
+  .research-activity,
+  .research-summary-wrapper {
+    margin-left: 0;
+  }
+
+  .research-sources-dropdown {
+    width: calc(100vw - 42px);
+  }
+
+  .message-actions {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .research-spinner,
+  .research-activity,
+  .research-summary-wrapper,
+  .research-sources-dropdown {
+    animation: none !important;
+  }
+
+  .research-chevron {
+    transition: none !important;
+  }
+}
+
+/* Soft animated research indicator */
+
+.research-status-header span::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow:
+    0 0 0 0
+    rgba(255, 255, 255, 0.35);
+  animation:
+    researchDot 1.5s
+    ease-out infinite;
+}
+
+/* Hide the literal status character when active.
+   The CSS-generated dot becomes the animated indicator. */
+.research-status-header span {
+  font-size: 0;
+}
+
+/* =========================================================
+   KEYFRAMES
+   ========================================================= */
+
+@keyframes researchCardIn {
+  from {
+    opacity: 0;
+    transform:
+      translateY(10px)
+      scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform:
+      translateY(0)
+      scale(1);
+  }
+}
+
+@keyframes researchShimmer {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  55%,
+  100% {
+    transform: translateX(120%);
+  }
+}
+
+@keyframes researchPulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.08);
+  }
+}
+
+@keyframes researchDot {
+  0% {
+    box-shadow:
+      0 0 0 0
+      rgba(255, 255, 255, 0.35);
+  }
+
+  70% {
+    box-shadow:
+      0 0 0 7px
+      rgba(255, 255, 255, 0);
+  }
+
+  100% {
+    box-shadow:
+      0 0 0 0
+      rgba(255, 255, 255, 0);
+  }
+}
+
+@keyframes researchTextIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes researchItemIn {
+  from {
+    opacity: 0;
+    transform:
+      translateY(5px);
+  }
+
+  to {
+    opacity: 1;
+    transform:
+      translateY(0);
+  }
+}
+
+@keyframes sourceAppear {
+  from {
+    opacity: 0;
+    transform:
+      translateX(-8px)
+      scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform:
+      translateX(0)
+      scale(1);
+  }
+}
+
+@keyframes researchComplete {
+  from {
+    opacity: 0;
+    transform:
+      translateY(5px);
+  }
+
+  to {
+    opacity: 0.6;
+    transform:
+      translateY(0);
+  }
+}
+
+/* Respect users who prefer reduced motion. */
+
+@media (prefers-reduced-motion: reduce) {
+  .research-status-card,
+  .research-status-card::before,
+  .research-status-header span,
+  .research-status-header span::after,
+  .research-status-text,
+  .research-current-query,
+  .research-provider,
+  .research-source-item,
+  .research-more-sources,
+  .research-summary {
+    animation: none !important;
+  }
+
+  .research-source-item {
+    transition: none !important;
+  }
+}
+/* =========================================================
+   FINAL ZOYA RESPONSE POLISH
+   ========================================================= */
+
+.message-bubble a {
+  color: #c7c7d8;
+  text-decoration: none;
+  font-weight: 500;
+  border-bottom: 1px solid
+    rgba(199, 199, 216, 0.24);
+  transition:
+    color 160ms ease,
+    border-color 160ms ease;
+}
+
+.message-bubble a:hover {
+  color: #ffffff;
+  border-color:
+    rgba(255, 255, 255, 0.5);
+}
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  margin-top: 7px;
+  min-height: 24px;
+  opacity: 0.72;
+}
+
+.message-action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 25px;
+  padding: 3px 7px;
+  border: 1px solid
+    rgba(255, 255, 255, 0.06);
+  border-radius: 7px;
+  background: transparent;
+  color: rgba(
+    255,
+    255,
+    255,
+    0.42
+  );
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    background 160ms ease,
+    border-color 160ms ease;
+}
+
+.message-action-button:hover {
+  color: rgba(
+    255,
+    255,
+    255,
+    0.9
+  );
+  background:
+    rgba(255, 255, 255, 0.045);
+  border-color:
+    rgba(255, 255, 255, 0.12);
+}
+
+.message-action-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.research-summary-button {
+  transition:
+    color 160ms ease,
+    opacity 160ms ease;
+}
+
+.research-summary-count {
+  color: rgba(
+    255,
+    255,
+    255,
+    0.58
+  );
+}
+
+.research-summary-button:hover
+  .research-summary-count {
+  color: rgba(
+    255,
+    255,
+    255,
+    0.88
+  );
+}
+
+.research-worked-time {
+  color: rgba(
+    255,
+    255,
+    255,
+    0.32
+  );
+}
+/* =========================================================
+   INLINE RESEARCH CITATIONS
+   ========================================================= */
+
+.citation-wrap {
+  position: relative;
+  display: inline-flex;
+  vertical-align: baseline;
+  margin: 0 2px;
+}
+
+.citation-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  max-width: 220px;
+  padding: 2px 7px 2px 4px;
+  border: 1px solid
+    rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background:
+    rgba(255, 255, 255, 0.045);
+  color: rgba(
+    255,
+    255,
+    255,
+    0.62
+  );
+  font: inherit;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  vertical-align: middle;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.citation-chip:hover,
+.citation-chip.open {
+  background:
+    rgba(255, 255, 255, 0.085);
+  border-color:
+    rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.citation-chip:active {
+  transform: scale(0.98);
+}
+
+.citation-chip-dot {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background:
+    rgba(255, 255, 255, 0.11);
+  color: rgba(
+    255,
+    255,
+    255,
+    0.82
+  );
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.citation-chip-label {
+  max-width: 165px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.citation-chip-chevron {
+  color: rgba(
+    255,
+    255,
+    255,
+    0.38
+  );
+  font-size: 10px;
+  line-height: 1;
+}
+
+.citation-popover {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 7px);
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  width: min(
+    300px,
+    calc(100vw - 40px)
+  );
+  padding: 11px;
+  border: 1px solid
+    rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background:
+    rgba(20, 20, 25, 0.98);
+  box-shadow:
+    0 16px 45px
+    rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  animation:
+    citationPopoverIn
+    160ms
+    ease-out;
+}
+
+.citation-popover-title {
+  color: #f2f2f5;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.citation-popover-domain {
+  margin-top: 3px;
+  color: rgba(
+    255,
+    255,
+    255,
+    0.38
+  );
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.citation-popover-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 9px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  background:
+    rgba(255, 255, 255, 0.045);
+  color: rgba(
+    255,
+    255,
+    255,
+    0.7
+  );
+  font-size: 10px;
+  font-weight: 600;
+  text-decoration: none !important;
+  border: 1px solid
+    rgba(255, 255, 255, 0.055);
+}
+
+.citation-popover-open:hover {
+  background:
+    rgba(255, 255, 255, 0.075);
+  color: #ffffff;
+}
+
+.citation-popover-open span {
+  color: rgba(
+    255,
+    255,
+    255,
+    0.42
+  );
+}
+
+@keyframes citationPopoverIn {
+  from {
+    opacity: 0;
+    transform:
+      translateY(-4px)
+      scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform:
+      translateY(0)
+      scale(1);
+  }
+}
+
+@media (max-width: 700px) {
+  .citation-popover {
+    left: auto;
+    right: 0;
+  }
+
+  .citation-chip {
+    max-width: 180px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .citation-popover {
+    animation: none;
+  }
+
+  .citation-chip {
+    transition: none;
+  }
+}

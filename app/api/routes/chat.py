@@ -53,10 +53,14 @@ class StreamChatRequest(BaseModel):
         return value
 
 
-async def event_stream(request: StreamChatRequest):
+async def event_stream(
+    request: StreamChatRequest,
+):
     try:
-        conversation_id = chat_service.get_active_conversation_id(
-            request.user_id
+        conversation_id = (
+            chat_service.get_active_conversation_id(
+                request.user_id
+            )
         )
 
         if request.conversation_id is not None:
@@ -64,33 +68,40 @@ async def event_stream(request: StreamChatRequest):
 
         yield (
             "event: metadata\n"
-            f"data: {json.dumps({'conversation_id': conversation_id})}\n\n"
+            f"data: {json.dumps({'conversation_id': conversation_id}, ensure_ascii=False)}\n\n"
         )
 
-        async for chunk in chat_service.stream_chat(
+        async for event in chat_service.stream_chat_events(
             user_id=request.user_id,
             user_name=request.user_name,
             message=request.message,
             conversation_id=request.conversation_id,
         ):
-            yield (
-                "event: chunk\n"
-                f"data: {json.dumps({'content': chunk})}\n\n"
+            event_name = event.get(
+                "event",
+                "message",
             )
 
-        yield (
-            "event: done\n"
-            f"data: {json.dumps({'active_provider': chat_service.ai.active_provider})}\n\n"
-        )
+            payload = event.get(
+                "data",
+                {},
+            )
+
+            yield (
+                f"event: {event_name}\n"
+                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            )
 
     except ValueError as error:
         yield (
             "event: error\n"
-            f"data: {json.dumps({'message': str(error)})}\n\n"
+            f"data: {json.dumps({'message': str(error)}, ensure_ascii=False)}\n\n"
         )
 
     except Exception:
-        print("\n❌ STREAM CHAT ERROR")
+        print(
+            "\n❌ STREAM CHAT ERROR"
+        )
 
         import traceback
 
@@ -98,12 +109,14 @@ async def event_stream(request: StreamChatRequest):
 
         yield (
             "event: error\n"
-            f"data: {json.dumps({'message': 'Zoya AI service is temporarily unavailable.'})}\n\n"
+            f"data: {json.dumps({'message': 'Zoya AI service is temporarily unavailable.'}, ensure_ascii=False)}\n\n"
         )
 
 
 @router.post("/stream")
-async def stream_chat(request: StreamChatRequest):
+async def stream_chat(
+    request: StreamChatRequest,
+):
     if not request.message.strip():
         raise HTTPException(
             status_code=400,
@@ -155,9 +168,15 @@ async def get_history(
         )
 
     except Exception as error:
-        print("\n❌ HISTORY ERROR")
-        print(f"Error type: {type(error).__name__}")
-        print(f"Error message: {error}")
+        print(
+            "\n❌ HISTORY ERROR"
+        )
+        print(
+            f"Error type: {type(error).__name__}"
+        )
+        print(
+            f"Error message: {error}"
+        )
 
         raise HTTPException(
             status_code=503,
