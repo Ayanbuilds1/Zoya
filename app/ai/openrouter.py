@@ -28,7 +28,10 @@ class OpenRouterService(AIProvider):
     ) -> str:
         response = self.client.chat.completions.create(
             model=OPENROUTER_MODEL,
-            messages=build_chat_messages(message),
+            messages=build_chat_messages(
+                message,
+                conversation_history=conversation_history,
+            ),
             max_tokens=2048,
         )
 
@@ -48,7 +51,10 @@ class OpenRouterService(AIProvider):
     ) -> Iterator[str]:
         stream = self.client.chat.completions.create(
             model=OPENROUTER_MODEL,
-            messages=build_chat_messages(message),
+            messages=build_chat_messages(
+                message,
+                conversation_history=conversation_history,
+            ),
             max_tokens=2048,
             stream=True,
         )

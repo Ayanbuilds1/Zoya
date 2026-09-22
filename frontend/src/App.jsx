@@ -1074,6 +1074,18 @@ function App() {
         }
 
         finishAssistantMessage();
+        // A completed chat can persist durable memories server-side. Keep
+        // the existing Memory UI backed by a fresh API read, not local state.
+        try {
+          await refreshMemories();
+        } catch (error) {
+          // The chat itself already succeeded; surface any Memory-view
+          // failure through its existing state without replacing the reply.
+          console.error(
+            "Memory refresh after chat failed:",
+            error
+          );
+        }
       } catch (error) {
         const message =
           error instanceof Error

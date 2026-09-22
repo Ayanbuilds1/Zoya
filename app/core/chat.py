@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 from app.core.ai import create_ai_provider
 from app.core.brain import (
     BrainDecision,
+    ResponsePlan,
     ZoyaBrain,
 )
 from app.core.intent import ZoyaIntentRouter
@@ -38,6 +40,61 @@ class ZoyaChatService:
     MAX_RESEARCH_CONTEXT_CHARS = 5200
     MAX_RESEARCH_SOURCE_CONTENT_CHARS = 500
 
+    RESEARCH_FOLLOW_UP_PATTERNS = (
+        "detail me",
+        "details me",
+        "detail mein",
+        "details mein",
+        "detailed",
+        "deep dive",
+        "aur detail",
+        "aur details",
+        "aur batao",
+        "aur explain karo",
+        "aur explain",
+        "explain in detail",
+        "explain properly",
+        "properly explain",
+        "thoda detail",
+        "thodi detail",
+        "iske baare mein aur",
+        "ispe aur",
+        "isme aur",
+        "same topic",
+        "same wale",
+        "same one",
+        "continue",
+        "continue karo",
+        "aage batao",
+    )
+
+    RESEARCH_REFRESH_PATTERNS = (
+        "latest",
+        "current",
+        "today",
+        "today's",
+        "recent",
+        "recently",
+        "abhi",
+        "currently",
+        "this week",
+        "this month",
+        "right now",
+        "aaj",
+        "now",
+        "latest update",
+        "latest updates",
+        "current update",
+        "current updates",
+        "verify",
+        "fact check",
+        "fact-check",
+        "dobara search",
+        "phir search",
+        "again search",
+        "refresh",
+    )
+
     def __init__(self) -> None:
         self.ai = create_ai_provider()
         self.memory = MemoryManager()
@@ -54,6 +111,11 @@ class ZoyaChatService:
         )
 
         self.active_sessions: dict[int, int] = {}
+
+        # Last successful research result for each active conversation.
+        # Short follow-ups can reuse verified evidence instead of falling
+        # back to the model's general knowledge.
+        self.research_contexts: dict[int, Any] = {}
 
     @staticmethod
     def _compact_history(
@@ -132,10 +194,11 @@ class ZoyaChatService:
     def _build_memory_context(
         self,
         user_id: int,
+        query: str,
     ) -> str:
-        stored_memories = self.memory.get_memories(
+        stored_memories = self.memory.get_relevant_memories(
             user_id=user_id,
-            min_importance=1,
+            query=query,
         )
 
         if not stored_memories:
@@ -248,6 +311,247 @@ class ZoyaChatService:
             lines
         )
 
+    @classmethod
+    def _is_research_follow_up(
+        cls,
+        message: str,
+    ) -> bool:
+        normalized = " ".join(
+            message.lower().strip().split()
+        )
+
+        # Explicit freshness/verification requests must trigger new research.
+        if any(
+            pattern in normalized
+            for pattern in cls.RESEARCH_REFRESH_PATTERNS
+        ):
+            return False
+
+        if len(normalized.split()) > 12:
+            return False
+
+        return any(
+            pattern in normalized
+            for pattern in cls.RESEARCH_FOLLOW_UP_PATTERNS
+        )
+
+    def _should_bypass_brain(
+        self,
+        message: str,
+        conversation_id: int,
+    ) -> bool:
+        """
+        Use a lightweight path for very simple conversational turns.
+
+        This is intentionally a conservative fast-path guard, not a
+        keyword-driven intent system. The goal is only to avoid paying
+        for a second LLM call on obvious low-complexity turns such as
+        greetings, acknowledgements, or very short casual statements.
+
+        Questions, current-information requests, research-related turns,
+        and short follow-ups remain on the semantic Brain path.
+        """
+        normalized = " ".join(
+            message.lower().strip().split()
+        )
+
+        if not normalized:
+            return False
+
+        word_count = len(normalized.split())
+
+        # Longer messages are more likely to need semantic interpretation.
+        if word_count > 3:
+            return False
+
+        # A question should keep Brain available for context resolution.
+        if "?" in message:
+            return False
+
+        # Very short temporal/research signals still need semantic routing.
+        reasoning_markers = (
+            "latest",
+            "current",
+            "today",
+            "aaj",
+            "abhi",
+            "news",
+            "research",
+            "search",
+            "web",
+            "verify",
+            "fact",
+            "explain",
+            "detail",
+            "details",
+            "why",
+            "how",
+            "what",
+            "who",
+            "which",
+            "when",
+            "where",
+            "can",
+            "could",
+            "should",
+            "would",
+        )
+
+        if any(
+            marker in normalized
+            for marker in reasoning_markers
+        ):
+            return False
+
+        # If this conversation has active research context, short turns
+        # may be natural follow-ups ("phir?", "continue", "aur?"). Keep
+        # them on the Brain path rather than risking loss of evidence.
+        if conversation_id in self.research_contexts:
+            return False
+
+        return True
+
+    def _get_reusable_research_context(
+        self,
+        conversation_id: int,
+        message: str,
+    ) -> Any | None:
+        if not self._is_research_follow_up(message):
+            return None
+
+        return self.research_contexts.get(
+            conversation_id
+        )
+
+    def _attach_research_context_to_decision(
+        self,
+        brain_decision: BrainDecision,
+        research_result: Any,
+        current_message: str,
+    ) -> BrainDecision:
+        """
+        Attach verified research evidence to a contextual follow-up.
+
+        Explicit requests such as "detail me batao" must override an
+        unreliable LLM response-length decision so the final answer does
+        not collapse into a short repetition of the researched list.
+        """
+        normalized = " ".join(
+            current_message.lower().strip().split()
+        )
+
+        explicitly_detailed = (
+            len(normalized.split()) <= 12
+            and any(
+                pattern in normalized
+                for pattern in (
+                    "detail me",
+                    "details me",
+                    "detail mein",
+                    "details mein",
+                    "detailed",
+                    "deep dive",
+                    "aur detail",
+                    "aur details",
+                    "explain in detail",
+                    "explain properly",
+                    "properly explain",
+                    "thoda detail",
+                    "thodi detail",
+                    "full explain",
+                    "pura explain",
+                )
+            )
+        )
+
+        if explicitly_detailed:
+            plan = ResponsePlan(
+                response_length="detailed",
+                response_style="deep_explanation",
+                needs_structure=True,
+                needs_conclusion=True,
+                needs_current_information=True,
+                needs_step_by_step=False,
+            )
+
+            interpreted_request = (
+                "Give a detailed explanation of the previously researched "
+                f"topic: {research_result.query}"
+            )
+        else:
+            plan = replace(
+                brain_decision.response_plan,
+                needs_current_information=True,
+            )
+
+            interpreted_request = (
+                brain_decision.interpreted_request
+                or research_result.query
+            )
+
+        return replace(
+            brain_decision,
+            intent="research_follow_up",
+            user_goal=(
+                "Continue the previous research topic using the "
+                "already collected evidence."
+            ),
+            interpreted_request=interpreted_request,
+            research_needed=True,
+            research_query=research_result.query,
+            needs_clarification=False,
+            clarification_question="",
+            response_plan=plan,
+        )
+
+    def _remember_research_result(
+        self,
+        conversation_id: int,
+        research_result: Any | None,
+    ) -> None:
+        if research_result is None:
+            return
+
+        self.research_contexts[
+            conversation_id
+        ] = research_result
+
+        print(
+            f"♻️ Research context saved for conversation {conversation_id}: "
+            f"{len(research_result.sources)} sources"
+        )
+
+    @staticmethod
+    def _research_summary(
+        research_result: Any | None,
+        *,
+        reused: bool = False,
+    ) -> dict[str, Any] | None:
+        if research_result is None:
+            return None
+
+        return {
+            "total_sources": len(
+                research_result.sources
+            ),
+            "search_count": (
+                research_result.search_count
+            ),
+            "providers_used": (
+                research_result.providers_used
+            ),
+            "evidence_status": (
+                "sufficient"
+                if research_result.evidence_status.sufficient
+                else "incomplete"
+            ),
+            "research_duration": round(
+                research_result.research_duration,
+                1,
+            ),
+            "reused": reused,
+        }
+
     async def _prepare_chat_context(
         self,
         user_id: int,
@@ -356,6 +660,10 @@ class ZoyaChatService:
         )
 
         for item in extracted_memories:
+            print(
+                f"[MEMORY] Extracted: "
+                f"{item['key']} = {item['value']}"
+            )
             self.memory.save_memory(
                 user_id=user_id,
                 category=item["category"],
@@ -407,6 +715,53 @@ class ZoyaChatService:
             )
 
         # ---------------------------------------------------------
+        # Lightweight semantic fast path
+        # ---------------------------------------------------------
+        #
+        # Obvious low-complexity conversational turns do not need a
+        # separate Brain LLM call. We still build the normal contextual
+        # final-answer prompt, so recent history and persistent memory
+        # remain available to the final model.
+        if self._should_bypass_brain(
+            message=message,
+            conversation_id=conversation_id,
+        ):
+            fast_plan = self.brain.plan(
+                message=message,
+                conversation_history=(
+                    full_conversation_history
+                ),
+            )
+
+            fast_decision = BrainDecision(
+                intent="conversation",
+                user_goal=message,
+                interpreted_request=message,
+                research_needed=False,
+                research_query="",
+                needs_clarification=False,
+                clarification_question="",
+                confidence="high",
+                used_conversation_context=bool(
+                    full_conversation_history
+                ),
+                response_plan=fast_plan,
+            )
+
+            print(
+                "⚡ Brain fast path: "
+                f"skipping semantic LLM analysis for: {message!r}"
+            )
+
+            return (
+                conversation_id,
+                message,
+                compact_history,
+                None,
+                fast_decision,
+            )
+
+        # ---------------------------------------------------------
         # Semantic AI Brain
         # ---------------------------------------------------------
         brain_decision = (
@@ -435,7 +790,8 @@ class ZoyaChatService:
     ) -> str:
         memory_context = (
             self._build_memory_context(
-                user_id
+                user_id,
+                message,
             )
         )
 
@@ -450,6 +806,15 @@ class ZoyaChatService:
                 brain_decision.response_plan
             )
         )
+
+        if brain_decision.intent == "research_follow_up":
+            response_instruction += (
+                "\n- This is a follow-up to an earlier web-researched answer. "
+                "Use the supplied research evidence as the factual basis."
+                "\n- Expand the previous answer instead of merely repeating the same list."
+                "\n- For an explicit detail request, explain the important points for each item and add useful context supported by the sources."
+                "\n- Do not introduce unsupported current facts from general model knowledge."
+            )
 
         parts = [
             brain_instruction,
@@ -549,8 +914,33 @@ class ZoyaChatService:
 
         else:
             research_result = None
+            reused_research = False
 
-            if brain_decision.research_needed:
+            reusable_research = (
+                self._get_reusable_research_context(
+                    conversation_id=conversation_id,
+                    message=current_message,
+                )
+            )
+
+            if reusable_research is not None:
+                research_result = reusable_research
+                reused_research = True
+
+                print(
+                    f"♻️ Reusing research context for conversation "
+                    f"{conversation_id}: {len(research_result.sources)} sources"
+                )
+
+                brain_decision = (
+                    self._attach_research_context_to_decision(
+                        brain_decision=brain_decision,
+                        research_result=research_result,
+                        current_message=current_message,
+                    )
+                )
+
+            elif brain_decision.research_needed:
                 try:
                     research_query = (
                         brain_decision.research_query
@@ -563,6 +953,11 @@ class ZoyaChatService:
                             research_query,
                             emit=None,
                         )
+                    )
+
+                    self._remember_research_result(
+                        conversation_id=conversation_id,
+                        research_result=research_result,
                     )
 
                 except Exception as error:
@@ -693,8 +1088,33 @@ class ZoyaChatService:
             return
 
         research_result = None
+        reused_research = False
 
-        if brain_decision.research_needed:
+        reusable_research = (
+            self._get_reusable_research_context(
+                conversation_id=conversation_id,
+                message=current_message,
+            )
+        )
+
+        if reusable_research is not None:
+            research_result = reusable_research
+            reused_research = True
+
+            print(
+                f"♻️ Reusing research context for conversation "
+                f"{conversation_id}: {len(research_result.sources)} sources"
+            )
+
+            brain_decision = (
+                self._attach_research_context_to_decision(
+                    brain_decision=brain_decision,
+                    research_result=research_result,
+                    current_message=current_message,
+                )
+            )
+
+        elif brain_decision.research_needed:
             research_queue: asyncio.Queue[
                 tuple[str, dict[str, Any]]
             ] = asyncio.Queue()
@@ -767,6 +1187,11 @@ class ZoyaChatService:
                 try:
                     research_result = (
                         await research_task
+                    )
+
+                    self._remember_research_result(
+                        conversation_id=conversation_id,
+                        research_result=research_result,
                     )
 
                 except Exception as error:
@@ -895,29 +1320,10 @@ class ZoyaChatService:
             content=reply,
         )
 
-        research_summary = None
-
-        if research_result is not None:
-            research_summary = {
-                "total_sources": len(
-                    research_result.sources
-                ),
-                "search_count": (
-                    research_result.search_count
-                ),
-                "providers_used": (
-                    research_result.providers_used
-                ),
-                "evidence_status": (
-                    "sufficient"
-                    if research_result.evidence_status.sufficient
-                    else "incomplete"
-                ),
-                "research_duration": round(
-                    research_result.research_duration,
-                    1,
-                ),
-            }
+        research_summary = self._research_summary(
+            research_result,
+            reused=reused_research,
+        )
 
         yield {
             "event": "done",

@@ -9,26 +9,18 @@ from app.config import GEMINI_API_KEY
 class GeminiService(AIProvider):
     def __init__(self) -> None:
         self.client = genai.Client(api_key=GEMINI_API_KEY)
-        self.previous_interaction_id: str | None = None
 
     def _build_request(self, message: str) -> dict:
-        request = {
+        return {
             "model": "gemini-3.6-flash",
             "input": message,
             "system_instruction": ZOYA_SYSTEM_INSTRUCTION,
         }
 
-        if self.previous_interaction_id:
-            request["previous_interaction_id"] = self.previous_interaction_id
-
-        return request
-
     def send_message(self, message: str) -> str:
         interaction = self.client.interactions.create(
             **self._build_request(message)
         )
-
-        self.previous_interaction_id = interaction.id
 
         if not interaction.output_text:
             raise RuntimeError("Gemini returned an empty response.")
@@ -41,21 +33,10 @@ class GeminiService(AIProvider):
 
         stream = self.client.interactions.create(**request)
 
-        interaction_id: str | None = None
         emitted_text = False
 
         for event in stream:
             event_type = getattr(event, "event_type", None)
-
-            event_interaction = getattr(event, "interaction", None)
-            event_interaction_id = getattr(
-                event_interaction,
-                "id",
-                None,
-            )
-
-            if event_interaction_id:
-                interaction_id = event_interaction_id
 
             if event_type != "step.delta":
                 continue
@@ -75,9 +56,6 @@ class GeminiService(AIProvider):
 
             emitted_text = True
             yield text
-
-        if interaction_id:
-            self.previous_interaction_id = interaction_id
 
         if not emitted_text:
             raise RuntimeError("Gemini returned an empty streamed response.")

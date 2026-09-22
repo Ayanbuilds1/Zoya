@@ -24,7 +24,10 @@ class GroqService(AIProvider):
     ) -> str:
                 response = self.client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=build_chat_messages(message),
+            messages=build_chat_messages(
+                message,
+                conversation_history=conversation_history,
+            ),
             max_tokens=2048,
         )
                 content = response.choices[0].message.content
@@ -41,7 +44,10 @@ class GroqService(AIProvider):
     ) -> Iterator[str]:
         stream = self.client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=build_chat_messages(message),
+            messages=build_chat_messages(
+                message,
+                conversation_history=conversation_history,
+            ),
             max_tokens=2048,
             stream=True,
         )

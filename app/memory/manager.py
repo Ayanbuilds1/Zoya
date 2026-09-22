@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
@@ -15,6 +16,23 @@ from app.database.models import (
 
 
 class MemoryManager:
+    SINGLETON_KEYS = {
+        "name", "communication_language", "addressing_style",
+        "favorite_game", "favorite_sport", "favorite_color", "greeting_style",
+    }
+
+    ALWAYS_RELEVANT_KEYS = {
+        "communication_language", "addressing_style", "greeting_style",
+    }
+
+    CONCEPT_TERMS = {
+        "favorite_game": {"favorite", "fav", "game", "sport", "khel"},
+        "favorite_sport": {"favorite", "fav", "game", "sport", "khel"},
+        "addressing_style": {"aap", "address", "respect", "baat", "bol", "tu", "teri"},
+        "communication_language": {"language", "hinglish", "hindi", "english", "baat", "reply"},
+        "name": {"name", "naam", "who", "kaun"},
+    }
+
     def __init__(self) -> None:
         database_url = f"sqlite:///{DB_PATH}"
 
@@ -139,14 +157,24 @@ class MemoryManager:
         confidence: float = 0.8,
         source: str = "conversation",
     ) -> Memory:
+        category = category.strip()
+        key = key.strip().casefold()
+        value = re.sub(r"\s+", " ", value.strip())
+
         with self.SessionLocal() as session:
-            memory = session.scalars(
-                select(Memory)
-                .where(
-                    Memory.user_id == user_id,
-                    Memory.key == key,
+            query = select(Memory).where(
+                Memory.user_id == user_id,
+                Memory.key == key,
+            )
+
+            # Latest-value preferences intentionally share one record; a
+            # multi-value memory is unique by its key/value pair instead.
+            if key not in self.SINGLETON_KEYS:
+                query = query.where(
+                    func.lower(Memory.value) == value.casefold()
                 )
-            ).first()
+
+            memory = session.scalars(query).first()
 
             if memory:
                 memory.category = category
@@ -174,6 +202,8 @@ class MemoryManager:
             session.commit()
             session.refresh(memory)
 
+            print(f"[MEMORY] Saved: user={user_id} key={key}")
+
             return memory
 
     def get_memories(
@@ -192,6 +222,52 @@ class MemoryManager:
             ).all()
 
             return list(memories)
+
+    @staticmethod
+    def _terms(text: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9]+", text.casefold()))
+
+    def get_relevant_memories(
+        self,
+        user_id: int,
+        query: str,
+        limit: int = 8,
+    ) -> list[Memory]:
+        """Return only turn-relevant memories plus high-priority instructions."""
+        query_terms = self._terms(query)
+        candidates = self.get_memories(
+            user_id=user_id,
+            min_importance=1,
+        )
+        ranked: list[tuple[float, Memory]] = []
+
+        for memory in candidates:
+            key_terms = self._terms(memory.key.replace("_", " "))
+            value_terms = self._terms(memory.value)
+            concept_terms = self.CONCEPT_TERMS.get(memory.key, set())
+            overlap = len(query_terms & (key_terms | value_terms))
+            concept_match = bool(query_terms & concept_terms)
+            always_relevant = memory.key in self.ALWAYS_RELEVANT_KEYS
+
+            if not (overlap or concept_match or always_relevant):
+                continue
+
+            score = overlap * 10 + (8 if concept_match else 0)
+            score += memory.importance / 10
+            if always_relevant:
+                score += 6
+            ranked.append((score, memory))
+
+        ranked.sort(
+            key=lambda item: (
+                item[0],
+                item[1].importance,
+                item[1].updated_at,
+            ),
+            reverse=True,
+        )
+
+        return [memory for _, memory in ranked[:max(1, limit)]]
 
     # ------------------------------------------------------------------
     # Phase 7 - Memory UI / CRUD methods
