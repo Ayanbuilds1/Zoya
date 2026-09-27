@@ -5,8 +5,8 @@ Write-Host "=== Zoya Phase 2 Contract Verification v2 ===" -ForegroundColor Cyan
 Write-Host "Project root: $projectRoot"
 
 $required = @(
-    "app/core/chat.py",
-    "app/memory/manager.py"
+    "backend/app/core/chat.py",
+    "backend/app/memory/manager.py"
 )
 
 foreach ($path in $required) {
@@ -17,7 +17,7 @@ foreach ($path in $required) {
 
 Push-Location $projectRoot
 try {
-    python -m pytest "$PSScriptRoot\tests\test_contract_surface.py" -q
+    python -m pytest "$projectRoot\backend\tests\test_contract_surface.py" -q
     if ($LASTEXITCODE -ne 0) {
         throw "Phase 2 contract tests failed."
     }
@@ -27,4 +27,5 @@ try {
 finally {
     Pop-Location
 }
+
 
