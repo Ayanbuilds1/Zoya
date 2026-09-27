@@ -13,9 +13,9 @@ $Files = @(
     'frontend\src\App.jsx',
     'frontend\src\App.css',
     'frontend\src\index.css',
-    'app\core\chat.py',
-    'app\memory\manager.py',
-    'app\api\routes\chat.py'
+    'backend\app\core\chat.py',
+    'backend\app\memory\manager.py',
+    'backend\app\api\routes\chat.py'
 )
 
 New-Item -ItemType Directory -Force -Path $BackupRoot | Out-Null
@@ -53,3 +53,4 @@ Write-Host "Run backend:" -ForegroundColor Cyan
 Write-Host "uvicorn app.api.main:app --host 127.0.0.1 --port 8000 --reload"
 Write-Host ""
 Write-Host "Run frontend from frontend/: npm run dev" -ForegroundColor Cyan
+

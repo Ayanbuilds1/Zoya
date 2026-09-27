@@ -9,16 +9,16 @@ Goal: restore the known-good rich frontend and align the conversation/memory API
 - `frontend/src/App.jsx`
 - `frontend/src/App.css`
 - `frontend/src/index.css`
-- `app/core/chat.py`
-- `app/memory/manager.py`
-- `app/api/routes/chat.py`
+- `backend/app/core/chat.py`
+- `backend/app/memory/manager.py`
+- `backend/app/api/routes/chat.py`
 
 ## What is intentionally NOT changed
 
-- `app/core/ai.py`
-- `app/core/brain.py`
-- `app/research/*`
-- `app/ai/*`
+- `backend/app/core/ai.py`
+- `backend/app/core/brain.py`
+- `backend/app/research/*`
+- `backend/app/ai/*`
 - `.env`
 - SQLite/database files
 - frontend component/hook files outside the three listed frontend files
@@ -70,3 +70,6 @@ Frontend:
 ```powershell
 npm run dev
 ```
+
+
+

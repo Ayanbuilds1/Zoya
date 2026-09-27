@@ -1,6 +1,6 @@
 import sqlite3
 
-connection = sqlite3.connect("zoya.db")
+connection = sqlite3.connect("backend/zoya.db")
 
 tables = connection.execute(
     "SELECT name FROM sqlite_master "

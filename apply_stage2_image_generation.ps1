@@ -19,9 +19,9 @@ $backupRoot = Join-Path $ProjectRoot "_tool_image_generation_backups\$timestamp"
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 
 $changed = @(
-    "app\tools\imagegen.py",
-    "app\tools\defaults.py",
-    "app\core\brain.py"
+    "backend\app\tools\imagegen.py",
+    "backend\app\tools\defaults.py",
+    "backend\app\core\brain.py"
 )
 
 foreach ($relative in $changed) {
@@ -34,12 +34,12 @@ foreach ($relative in $changed) {
 $patchRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $copyMap = @{
-    "app\tools\imagegen.py" = "app\tools\imagegen.py"
-    "app\tools\image_provider.py" = "app\tools\image_provider.py"
-    "app\tools\image_providers.py" = "app\tools\image_providers.py"
-    "app\tools\image_router.py" = "app\tools\image_router.py"
-    "app\tools\defaults.py" = "app\tools\defaults.py"
-    "app\core\brain.py" = "app\core\brain.py"
+    "backend\app\tools\imagegen.py" = "backend\app\tools\imagegen.py"
+    "backend\app\tools\image_provider.py" = "backend\app\tools\image_provider.py"
+    "backend\app\tools\image_providers.py" = "backend\app\tools\image_providers.py"
+    "backend\app\tools\image_router.py" = "backend\app\tools\image_router.py"
+    "backend\app\tools\defaults.py" = "backend\app\tools\defaults.py"
+    "backend\app\core\brain.py" = "backend\app\core\brain.py"
     "tests\test_image_generation_stage2.py" = "tests\test_image_generation_stage2.py"
 }
 
@@ -61,19 +61,19 @@ Write-Host "Project root: $ProjectRoot"
 Write-Host "Backup: $backupRoot"
 
 & $python -m py_compile `
-    "$ProjectRoot\app\tools\imagegen.py" `
-    "$ProjectRoot\app\tools\image_provider.py" `
-    "$ProjectRoot\app\tools\image_providers.py" `
-    "$ProjectRoot\app\tools\image_router.py" `
-    "$ProjectRoot\app\tools\defaults.py" `
-    "$ProjectRoot\app\core\brain.py"
+    "$ProjectRoot\backend\app\tools\imagegen.py" `
+    "$ProjectRoot\backend\app\tools\image_provider.py" `
+    "$ProjectRoot\backend\app\tools\image_providers.py" `
+    "$ProjectRoot\backend\app\tools\image_router.py" `
+    "$ProjectRoot\backend\app\tools\defaults.py" `
+    "$ProjectRoot\backend\app\core\brain.py"
 
 if ($LASTEXITCODE -ne 0) {
     throw "Python compile check failed."
 }
 
 try {
-    & $python -m pytest -q "$ProjectRoot\tests\test_image_generation_stage2.py"
+    & $python -m pytest -q "$ProjectRoot\backend\tests\test_image_generation_stage2.py"
     if ($LASTEXITCODE -ne 0) {
         throw "Stage 2 image-generation tests failed."
     }
@@ -85,3 +85,4 @@ catch {
 
 Write-Host "Stage 2 image-generation patch applied."
 Write-Host "This installer does NOT modify frontend, chat.py, execution.py, registry.py, types.py, memory, research, scheduler, database, or ImageMagick implementation."
+
