@@ -14,7 +14,9 @@ class GroqService(AIProvider):
             )
 
         self.client = Groq(
-            api_key=GROQ_API_KEY
+            api_key=GROQ_API_KEY,
+            timeout=20.0,
+            max_retries=0,
         )
 
     def send_message(

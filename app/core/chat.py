@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from app.core.ai import create_ai_provider
 from app.core.brain import (
@@ -16,6 +18,16 @@ from app.memory.extractor import MemoryExtractor
 from app.memory.manager import MemoryManager
 from app.research.orchestrator import (
     ResearchOrchestrator,
+)
+from app.tools import (
+    ToolExecutionRequest,
+    ToolExecutionResult,
+    ToolExecutor,
+    build_default_registry,
+)
+from app.tools.result_presentation import (
+    ToolResponsePresentation,
+    ToolResultPresenter,
 )
 
 
@@ -102,8 +114,20 @@ class ZoyaChatService:
 
         self.intent_router = ZoyaIntentRouter()
 
+        project_root = Path(__file__).resolve().parents[2]
+        self.tool_executor = ToolExecutor(
+            build_default_registry(
+                workspace_root=str(project_root),
+            )
+        )
+        self.pending_tool_requests: dict[
+            tuple[int, int],
+            ToolExecutionRequest,
+        ] = {}
+
         self.brain = ZoyaBrain(
             ai_provider=self.ai,
+            tool_catalog=self.tool_executor.list_manifests(),
         )
 
         self.research = ResearchOrchestrator(
@@ -194,11 +218,10 @@ class ZoyaChatService:
     def _build_memory_context(
         self,
         user_id: int,
-        query: str,
     ) -> str:
-        stored_memories = self.memory.get_relevant_memories(
+        stored_memories = self.memory.get_memories(
             user_id=user_id,
-            query=query,
+            min_importance=1,
         )
 
         if not stored_memories:
@@ -334,82 +357,6 @@ class ZoyaChatService:
             pattern in normalized
             for pattern in cls.RESEARCH_FOLLOW_UP_PATTERNS
         )
-
-    def _should_bypass_brain(
-        self,
-        message: str,
-        conversation_id: int,
-    ) -> bool:
-        """
-        Use a lightweight path for very simple conversational turns.
-
-        This is intentionally a conservative fast-path guard, not a
-        keyword-driven intent system. The goal is only to avoid paying
-        for a second LLM call on obvious low-complexity turns such as
-        greetings, acknowledgements, or very short casual statements.
-
-        Questions, current-information requests, research-related turns,
-        and short follow-ups remain on the semantic Brain path.
-        """
-        normalized = " ".join(
-            message.lower().strip().split()
-        )
-
-        if not normalized:
-            return False
-
-        word_count = len(normalized.split())
-
-        # Longer messages are more likely to need semantic interpretation.
-        if word_count > 3:
-            return False
-
-        # A question should keep Brain available for context resolution.
-        if "?" in message:
-            return False
-
-        # Very short temporal/research signals still need semantic routing.
-        reasoning_markers = (
-            "latest",
-            "current",
-            "today",
-            "aaj",
-            "abhi",
-            "news",
-            "research",
-            "search",
-            "web",
-            "verify",
-            "fact",
-            "explain",
-            "detail",
-            "details",
-            "why",
-            "how",
-            "what",
-            "who",
-            "which",
-            "when",
-            "where",
-            "can",
-            "could",
-            "should",
-            "would",
-        )
-
-        if any(
-            marker in normalized
-            for marker in reasoning_markers
-        ):
-            return False
-
-        # If this conversation has active research context, short turns
-        # may be natural follow-ups ("phir?", "continue", "aur?"). Keep
-        # them on the Brain path rather than risking loss of evidence.
-        if conversation_id in self.research_contexts:
-            return False
-
-        return True
 
     def _get_reusable_research_context(
         self,
@@ -552,6 +499,127 @@ class ZoyaChatService:
             "reused": reused,
         }
 
+    @staticmethod
+    def _is_confirmation_message(message: str) -> bool:
+        normalized = " ".join(message.lower().strip().split())
+        return normalized in {
+            "yes",
+            "y",
+            "haan",
+            "ha",
+            "confirm",
+            "confirmed",
+            "proceed",
+            "go ahead",
+            "do it",
+            "kar do",
+            "kardo",
+            "okay",
+            "ok",
+            "theek hai",
+            "thik hai",
+        }
+
+    @staticmethod
+    def _is_rejection_message(message: str) -> bool:
+        normalized = " ".join(message.lower().strip().split())
+        return normalized in {
+            "no",
+            "n",
+            "nahi",
+            "cancel",
+            "cancel it",
+            "stop",
+            "dont",
+            "don't",
+            "mat karo",
+            "rehne do",
+        }
+
+    @staticmethod
+    def _format_tool_execution_response(
+        result: ToolExecutionResult,
+    ) -> str:
+        """Render a stable user-facing response from a structured tool result."""
+        return ToolResultPresenter.present(result).text
+
+    def _execute_tool_request(
+        self,
+        user_id: int,
+        conversation_id: int,
+        request: ToolExecutionRequest,
+    ) -> ToolResponsePresentation:
+        result = self.tool_executor.execute(request)
+
+        if result.status == "confirmation_required":
+            self.pending_tool_requests[
+                (user_id, conversation_id)
+            ] = request
+
+        return ToolResultPresenter.present(result)
+
+    def _resolve_pending_tool_confirmation(
+        self,
+        user_id: int,
+        conversation_id: int,
+        message: str,
+    ) -> ToolResponsePresentation | str | None:
+        key = (user_id, conversation_id)
+        pending = self.pending_tool_requests.get(key)
+
+        if pending is None:
+            return None
+
+        if self._is_confirmation_message(message):
+            self.pending_tool_requests.pop(key, None)
+            confirmed_request = ToolExecutionRequest(
+                tool_name=pending.tool_name,
+                arguments=dict(pending.arguments),
+                confirmed=True,
+                source=pending.source,
+            )
+            return self._execute_tool_request(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                request=confirmed_request,
+            )
+
+        if self._is_rejection_message(message):
+            self.pending_tool_requests.pop(key, None)
+            return "The pending tool action cancel kar diya gaya."
+
+        # A new unrelated request invalidates an old confirmation.
+        self.pending_tool_requests.pop(key, None)
+        return None
+
+    def _execute_tool_decision(
+        self,
+        user_id: int,
+        conversation_id: int,
+        brain_decision: BrainDecision,
+    ) -> ToolResponsePresentation | None:
+        if not brain_decision.tool_needed:
+            return None
+
+        if brain_decision.needs_clarification:
+            return None
+
+        if not brain_decision.tool_name:
+            return None
+
+        request = ToolExecutionRequest(
+            tool_name=brain_decision.tool_name,
+            arguments=dict(brain_decision.tool_arguments or {}),
+            confirmed=False,
+            source="brain",
+        )
+
+        return self._execute_tool_request(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            request=request,
+        )
+
     async def _prepare_chat_context(
         self,
         user_id: int,
@@ -562,7 +630,7 @@ class ZoyaChatService:
         int,
         str,
         list[dict[str, str]],
-        str | None,
+        ToolResponsePresentation | str | None,
         BrainDecision,
     ]:
         """
@@ -660,10 +728,6 @@ class ZoyaChatService:
         )
 
         for item in extracted_memories:
-            print(
-                f"[MEMORY] Extracted: "
-                f"{item['key']} = {item['value']}"
-            )
             self.memory.save_memory(
                 user_id=user_id,
                 category=item["category"],
@@ -680,6 +744,46 @@ class ZoyaChatService:
                 self.MAX_HISTORY_CONTEXT_CHARS,
             )
         )
+
+        pending_response = self._resolve_pending_tool_confirmation(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            message=message,
+        )
+
+        if pending_response is not None:
+            fallback_plan = self.brain.plan(
+                message=message,
+                conversation_history=(
+                    full_conversation_history
+                ),
+            )
+
+            pending_decision = BrainDecision(
+                intent="tool_confirmation",
+                user_goal="Confirm or cancel a pending tool action.",
+                interpreted_request=message,
+                research_needed=False,
+                research_query="",
+                needs_clarification=False,
+                clarification_question="",
+                confidence="high",
+                used_conversation_context=bool(
+                    full_conversation_history
+                ),
+                response_plan=fallback_plan,
+                tool_needed=False,
+                tool_name="",
+                tool_arguments={},
+            )
+
+            return (
+                conversation_id,
+                message,
+                compact_history,
+                pending_response,
+                pending_decision,
+            )
 
         # If the deterministic router already handled this action,
         # do not spend an additional LLM call on Brain reasoning.
@@ -715,53 +819,6 @@ class ZoyaChatService:
             )
 
         # ---------------------------------------------------------
-        # Lightweight semantic fast path
-        # ---------------------------------------------------------
-        #
-        # Obvious low-complexity conversational turns do not need a
-        # separate Brain LLM call. We still build the normal contextual
-        # final-answer prompt, so recent history and persistent memory
-        # remain available to the final model.
-        if self._should_bypass_brain(
-            message=message,
-            conversation_id=conversation_id,
-        ):
-            fast_plan = self.brain.plan(
-                message=message,
-                conversation_history=(
-                    full_conversation_history
-                ),
-            )
-
-            fast_decision = BrainDecision(
-                intent="conversation",
-                user_goal=message,
-                interpreted_request=message,
-                research_needed=False,
-                research_query="",
-                needs_clarification=False,
-                clarification_question="",
-                confidence="high",
-                used_conversation_context=bool(
-                    full_conversation_history
-                ),
-                response_plan=fast_plan,
-            )
-
-            print(
-                "⚡ Brain fast path: "
-                f"skipping semantic LLM analysis for: {message!r}"
-            )
-
-            return (
-                conversation_id,
-                message,
-                compact_history,
-                None,
-                fast_decision,
-            )
-
-        # ---------------------------------------------------------
         # Semantic AI Brain
         # ---------------------------------------------------------
         brain_decision = (
@@ -773,6 +830,22 @@ class ZoyaChatService:
             )
         )
 
+        if brain_decision.tool_needed:
+            tool_response = self._execute_tool_decision(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                brain_decision=brain_decision,
+            )
+
+            if tool_response is not None:
+                return (
+                    conversation_id,
+                    message,
+                    compact_history,
+                    tool_response,
+                    brain_decision,
+                )
+
         return (
             conversation_id,
             message,
@@ -780,6 +853,65 @@ class ZoyaChatService:
             None,
             brain_decision,
         )
+
+    @staticmethod
+    def _tool_response_text(
+        direct_response: ToolResponsePresentation | str,
+    ) -> str:
+        if isinstance(
+            direct_response,
+            ToolResponsePresentation,
+        ):
+            return direct_response.text
+
+        return direct_response
+
+    @staticmethod
+    def _tool_response_image(
+        direct_response: ToolResponsePresentation | str,
+    ) -> dict[str, Any] | None:
+        if not isinstance(
+            direct_response,
+            ToolResponsePresentation,
+        ):
+            return None
+
+        if not direct_response.image:
+            return None
+
+        image = dict(
+            direct_response.image
+        )
+
+        filename = image.get(
+            "filename"
+        )
+
+        if not isinstance(
+            filename,
+            str,
+        ):
+            return None
+
+        filename = filename.strip()
+
+        if not filename:
+            return None
+
+        encoded_filename = quote(
+            filename,
+            safe="",
+        )
+
+        image["url"] = (
+            f"/api/generated-images/{encoded_filename}"
+        )
+
+        image["download_url"] = (
+            f"/api/generated-images/{encoded_filename}/download"
+        )
+
+        return image
 
     def _build_contextual_message(
         self,
@@ -790,8 +922,7 @@ class ZoyaChatService:
     ) -> str:
         memory_context = (
             self._build_memory_context(
-                user_id,
-                message,
+                user_id
             )
         )
 
@@ -896,10 +1027,21 @@ class ZoyaChatService:
             conversation_id=conversation_id,
         )
 
+        image: dict[str, Any] | None = None
+
         if direct_response is not None:
-            reply = direct_response
+            reply = self._tool_response_text(
+                direct_response
+            )
+
+            image = self._tool_response_image(
+                direct_response
+            )
+
             active_provider = (
-                "intent-router"
+                "tool-executor"
+                if brain_decision.intent.startswith("tool")
+                else "intent-router"
             )
 
         elif brain_decision.needs_clarification:
@@ -1000,11 +1142,16 @@ class ZoyaChatService:
             content=reply,
         )
 
-        return {
+        response: dict[str, Any] = {
             "response": reply,
             "conversation_id": conversation_id,
             "active_provider": active_provider,
         }
+
+        if image is not None:
+            response["image"] = image
+
+        return response
 
     async def stream_chat_events(
         self,
@@ -1028,28 +1175,54 @@ class ZoyaChatService:
             conversation_id=conversation_id,
         )
 
+        # Stream metadata after the conversation id has been resolved so
+        # clients can bind the response stream to the correct conversation.
+        yield {
+            "event": "metadata",
+            "data": {
+                "conversation_id": conversation_id,
+            },
+        }
+
         if direct_response is not None:
+            direct_text = self._tool_response_text(
+                direct_response
+            )
+
+            direct_image = self._tool_response_image(
+                direct_response
+            )
+
             self.memory.save_message(
                 conversation_id=conversation_id,
                 user_id=user_id,
                 role="assistant",
-                content=direct_response,
+                content=direct_text,
             )
 
             yield {
                 "event": "chunk",
                 "data": {
-                    "content": direct_response,
+                    "content": direct_text,
                 },
             }
+
+            if direct_image is not None:
+                yield {
+                    "event": "image",
+                    "data": direct_image,
+                }
 
             yield {
                 "event": "done",
                 "data": {
                     "active_provider": (
-                        "intent-router"
+                        "tool-executor"
+                        if brain_decision.intent.startswith("tool")
+                        else "intent-router"
                     ),
                     "research": None,
+                    "conversation_id": conversation_id,
                 },
             }
 
@@ -1082,6 +1255,7 @@ class ZoyaChatService:
                         "brain-clarification"
                     ),
                     "research": None,
+                    "conversation_id": conversation_id,
                 },
             }
 
@@ -1332,6 +1506,7 @@ class ZoyaChatService:
                     self.ai.active_provider
                 ),
                 "research": research_summary,
+                "conversation_id": conversation_id,
             },
         }
 
@@ -1358,6 +1533,73 @@ class ZoyaChatService:
 
                 if content:
                     yield content
+
+    def list_conversations(
+        self,
+        user_id: int,
+        limit: int = 50,
+    ) -> list[dict]:
+        return self.memory.list_conversations(
+            user_id=user_id,
+            limit=limit,
+        )
+
+    def create_conversation(
+        self,
+        user_id: int,
+    ) -> dict:
+        conversation = self.memory.create_conversation(user_id)
+        self.active_sessions[user_id] = conversation.conversation_id
+        self.research_contexts.pop(
+            conversation.conversation_id,
+            None,
+        )
+        return {
+            "conversation_id": conversation.conversation_id,
+            "title": "New conversation",
+            "started_at": (
+                conversation.started_at.isoformat()
+                if conversation.started_at
+                else None
+            ),
+            "message_count": conversation.message_count,
+        }
+
+    def rename_conversation(
+        self,
+        user_id: int,
+        conversation_id: int,
+        title: str,
+    ) -> dict | None:
+        conversation = self.memory.rename_conversation(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            title=title,
+        )
+
+        if conversation is None:
+            return None
+
+        return {
+            "conversation_id": conversation.conversation_id,
+            "title": conversation.summary or "New conversation",
+        }
+
+    def delete_conversation(
+        self,
+        user_id: int,
+        conversation_id: int,
+    ) -> bool:
+        deleted = self.memory.delete_conversation(
+            user_id=user_id,
+            conversation_id=conversation_id,
+        )
+
+        if deleted and self.active_sessions.get(user_id) == conversation_id:
+            self.active_sessions.pop(user_id, None)
+            self.research_contexts.pop(conversation_id, None)
+
+        return deleted
 
     def get_active_conversation_id(
         self,

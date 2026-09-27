@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping
+from dataclasses import fields
 from urllib.parse import urlparse
 
 from google import genai
@@ -17,458 +17,187 @@ from app.research.provider import (
 
 
 class GeminiGoogleSearchProvider(ResearchProvider):
-    """
-    Gemini provider using Google's built-in Google Search grounding.
+    """Gemini Google Search grounding provider.
 
-    Extracts grounded web sources from Gemini response metadata.
+    Uses Gemini 3.6 Flash by default. The older research implementation in
+    this project was still pointed at an obsolete model; current Google docs
+    list gemini-3.6-flash as supporting Google Search grounding.
     """
 
     name = "gemini"
+    REQUEST_TIMEOUT_SECONDS = 25.0
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str | None = None,
-    ) -> None:
-        self.api_key = (
-            api_key
-            or os.getenv(
-                "GEMINI_API_KEY",
-                "",
-            ).strip()
-        )
-
-        self.model = (
-            model
-            or os.getenv(
-                "GEMINI_RESEARCH_MODEL",
-                "",
-            ).strip()
-            or os.getenv(
-                "GEMINI_MODEL",
-                "",
-            ).strip()
-            or "gemini-2.5-flash"
-        )
-
-        self._client = (
-            genai.Client(
-                api_key=self.api_key,
-            )
+    def __init__(self) -> None:
+        self.api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        self.model = os.getenv(
+            "GEMINI_RESEARCH_MODEL",
+            "gemini-3.6-flash",
+        ).strip() or "gemini-3.6-flash"
+        self.client = (
+            genai.Client(api_key=self.api_key)
             if self.api_key
             else None
         )
 
     async def is_available(self) -> bool:
-        return self._client is not None
+        return self.client is not None and bool(self.api_key)
 
     async def search(
         self,
         query: str,
-        *,
         max_results: int = 10,
     ) -> list[SearchResult]:
-        if self._client is None:
+        if not await self.is_available():
             raise ResearchProviderUnavailable(
-                "Gemini API key is not configured."
+                "GEMINI_API_KEY is not configured."
             )
-
-        max_results = max(
-            1,
-            min(
-                20,
-                int(max_results),
-            ),
-        )
-
-        config = types.GenerateContentConfig(
-            tools=[
-                types.Tool(
-                    google_search=types.GoogleSearch()
-                )
-            ]
-        )
-
-        prompt = (
-            "You are a web research agent.\n"
-            "Use Google Search to research the user's question "
-            "with current web information.\n"
-            "Prefer authoritative and recent sources.\n"
-            "Do not invent sources or URLs.\n"
-            "Return a concise factual research summary.\n\n"
-            f"User question:\n{query}"
-        )
 
         try:
-            response = await asyncio.to_thread(
-                self._client.models.generate_content,
-                model=self.model,
-                contents=prompt,
-                config=config,
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._search_sync,
+                    query,
+                    max_results,
+                ),
+                timeout=self.REQUEST_TIMEOUT_SECONDS,
             )
-
+        except asyncio.TimeoutError as error:
+            raise ResearchProviderError(
+                "Gemini Google Search timed out."
+            ) from error
+        except ResearchProviderError:
+            raise
         except Exception as error:
             raise ResearchProviderError(
                 f"Gemini Google Search failed: {error}"
             ) from error
 
-        results = self._extract_grounding_sources(
-            response=response,
-            max_results=max_results,
-        )
-
-        if not results:
-            print(
-                "\n⚠️ Gemini returned no grounded web sources."
-            )
-
-            self._print_grounding_diagnostics(
-                response
-            )
-
-        return results
-
-    @classmethod
-    def _extract_grounding_sources(
-        cls,
-        response,
+    def _search_sync(
+        self,
+        query: str,
         max_results: int,
     ) -> list[SearchResult]:
-        candidates = cls._read(
-            response,
-            "candidates",
-            default=[],
+        grounding_tool = types.Tool(
+            google_search=types.GoogleSearch()
+        )
+        config = types.GenerateContentConfig(
+            tools=[grounding_tool]
         )
 
-        if not candidates:
+        print(
+            f"🔎 [RESEARCH] Gemini Google Search: {query!r} "
+            f"(model={self.model})"
+        )
+
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=query,
+            config=config,
+        )
+
+        candidate = None
+        if getattr(response, "candidates", None):
+            candidate = response.candidates[0]
+
+        metadata = getattr(candidate, "grounding_metadata", None)
+        if metadata is None:
+            print("⚠️ [RESEARCH] Gemini returned no grounding metadata.")
             return []
+
+        queries = getattr(metadata, "web_search_queries", None) or []
+        real_queries = [str(item).strip() for item in queries if str(item).strip()]
+        if real_queries:
+            print(
+                "🔎 [RESEARCH] Executed Google searches: "
+                + " | ".join(real_queries)
+            )
+        else:
+            print("⚠️ [RESEARCH] Gemini reported no executed search queries.")
+
+        chunks = getattr(metadata, "grounding_chunks", None) or []
+        supports = getattr(metadata, "grounding_supports", None) or []
+
+        snippets_by_index: dict[int, list[str]] = {}
+        for support in supports:
+            segment = getattr(support, "segment", None)
+            text = getattr(segment, "text", None) if segment else None
+            if not text:
+                continue
+            for raw_index in (getattr(support, "grounding_chunk_indices", None) or []):
+                try:
+                    idx = int(raw_index)
+                except (TypeError, ValueError):
+                    continue
+                snippets_by_index.setdefault(idx, []).append(str(text).strip())
 
         results: list[SearchResult] = []
         seen_urls: set[str] = set()
 
-        for candidate in candidates:
-            grounding_metadata = cls._read(
-                candidate,
-                "grounding_metadata",
-                default=None,
-            )
-
-            if grounding_metadata is None:
+        for index, chunk in enumerate(chunks):
+            web = getattr(chunk, "web", None)
+            url = getattr(web, "uri", None) if web else None
+            if not url:
                 continue
+            url = str(url).strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
 
-            grounding_chunks = cls._read(
-                grounding_metadata,
-                "grounding_chunks",
-                default=[],
-            )
+            title = (
+                getattr(web, "title", None) if web else None
+            ) or "Web source"
+            domain = urlparse(url).hostname or ""
+            domain = domain.removeprefix("www.")
+            snippet = " ".join(snippets_by_index.get(index, []))
+            snippet = snippet[:700]
 
-            grounding_supports = cls._read(
-                grounding_metadata,
-                "grounding_supports",
-                default=[],
-            )
-
-            support_snippets = (
-                cls._build_support_snippets(
-                    grounding_supports
+            results.append(
+                self._make_search_result(
+                    url=url,
+                    title=str(title).strip(),
+                    snippet=snippet,
+                    domain=domain,
+                    content=snippet,
                 )
             )
 
-            response_text = cls._read(
-                response,
-                "text",
-                default="",
-            )
+            if len(results) >= max_results:
+                break
 
-            response_text = str(
-                response_text or ""
-            ).strip()
-
-            for chunk_index, chunk in enumerate(
-                grounding_chunks
-            ):
-                web_chunk = cls._read(
-                    chunk,
-                    "web",
-                    default=None,
-                )
-
-                if web_chunk is None:
-                    continue
-
-                url = cls._read(
-                    web_chunk,
-                    "uri",
-                    default="",
-                )
-
-                title = cls._read(
-                    web_chunk,
-                    "title",
-                    default="Untitled source",
-                )
-
-                domain = cls._read(
-                    web_chunk,
-                    "domain",
-                    default="",
-                )
-
-                url = str(
-                    url or ""
-                ).strip()
-
-                title = str(
-                    title or "Untitled source"
-                ).strip()
-
-                domain = str(
-                    domain or ""
-                ).strip().lower()
-
-                if not url:
-                    continue
-
-                normalized_url = (
-                    url.rstrip("/")
-                    .casefold()
-                )
-
-                if normalized_url in seen_urls:
-                    continue
-
-                seen_urls.add(
-                    normalized_url
-                )
-
-                if not domain:
-                    domain = (
-                        urlparse(
-                            url
-                        ).netloc.lower()
-                    )
-
-                snippet = (
-                    support_snippets.get(
-                        chunk_index,
-                        "",
-                    ).strip()
-                )
-
-                if not snippet:
-                    snippet = response_text[
-                        :1200
-                    ]
-
-                results.append(
-                    SearchResult(
-                        title=title,
-                        url=url,
-                        snippet=snippet[:1200],
-                        provider=self.name,
-                        domain=domain,
-                        content=(
-                            snippet
-                            or response_text
-                        ),
-                    )
-                )
-
-                if len(results) >= max_results:
-                    return results
-
+        print(
+            f"✅ [RESEARCH] Gemini returned {len(results)} grounded sources."
+        )
         return results
 
-    @classmethod
-    def _build_support_snippets(
-        cls,
-        grounding_supports,
-    ) -> dict[int, str]:
-        snippets: dict[int, list[str]] = {}
-
-        for support in grounding_supports:
-            indices = cls._read(
-                support,
-                "grounding_chunk_indices",
-                default=[],
-            )
-
-            if not indices:
-                indices = cls._read(
-                    support,
-                    "groundingChunkIndices",
-                    default=[],
-                )
-
-            segment = cls._read(
-                support,
-                "segment",
-                default=None,
-            )
-
-            text = ""
-
-            if segment is not None:
-                text = cls._read(
-                    segment,
-                    "text",
-                    default="",
-                )
-
-            text = str(
-                text or ""
-            ).strip()
-
-            if not text:
-                continue
-
-            for index in indices:
-                try:
-                    numeric_index = int(
-                        index
-                    )
-                except (
-                    TypeError,
-                    ValueError,
-                ):
-                    continue
-
-                snippets.setdefault(
-                    numeric_index,
-                    [],
-                ).append(text)
-
-        return {
-            index: " ".join(
-                parts
-            )[:1600]
-            for index, parts
-            in snippets.items()
-        }
-
     @staticmethod
-    def _read(
-        value,
-        key: str,
-        default=None,
-    ):
-        """
-        Support both object-style and dictionary-style
-        response representations.
-        """
-        if value is None:
-            return default
+    def _make_search_result(
+        *,
+        url: str,
+        title: str,
+        snippet: str,
+        domain: str,
+        content: str,
+    ) -> SearchResult:
+        """Build against both the current and older SearchResult schemas."""
+        field_names = {field.name for field in fields(SearchResult)}
+        values: dict[str, object] = {}
 
-        if isinstance(
-            value,
-            Mapping,
-        ):
-            if key in value:
-                return value[key]
+        for name, value in {
+            "url": url,
+            "title": title,
+            "snippet": snippet,
+            "content": content,
+            "domain": domain,
+            "provider": "gemini",
+            "source": "gemini",
+            "published_at": None,
+            "published_date": None,
+            "relevance_score": 0.7,
+            "is_authoritative": False,
+            "freshness_days": None,
+            "covers_key_aspects": [],
+        }.items():
+            if name in field_names:
+                values[name] = value
 
-            camel_key = (
-                key.split("_")[0]
-                + "".join(
-                    part.capitalize()
-                    for part
-                    in key.split("_")[1:]
-                )
-            )
-
-            if camel_key in value:
-                return value[
-                    camel_key
-                ]
-
-            return default
-
-        result = getattr(
-            value,
-            key,
-            None,
-        )
-
-        if result is not None:
-            return result
-
-        camel_key = (
-            key.split("_")[0]
-            + "".join(
-                part.capitalize()
-                for part
-                in key.split("_")[1:]
-            )
-        )
-
-        return getattr(
-            value,
-            camel_key,
-            default,
-        )
-
-    @classmethod
-    def _print_grounding_diagnostics(
-        cls,
-        response,
-    ) -> None:
-        try:
-            candidates = cls._read(
-                response,
-                "candidates",
-                default=[],
-            )
-
-            print(
-                f"Gemini candidates: {len(candidates)}"
-            )
-
-            for index, candidate in enumerate(
-                candidates[:3]
-            ):
-                metadata = cls._read(
-                    candidate,
-                    "grounding_metadata",
-                    default=None,
-                )
-
-                if metadata is None:
-                    print(
-                        f"Candidate {index}: "
-                        "no grounding_metadata"
-                    )
-                    continue
-
-                chunks = cls._read(
-                    metadata,
-                    "grounding_chunks",
-                    default=[],
-                )
-
-                queries = cls._read(
-                    metadata,
-                    "web_search_queries",
-                    default=[],
-                )
-
-                print(
-                    f"Candidate {index}: "
-                    f"{len(chunks)} grounding chunks"
-                )
-
-                if queries:
-                    print(
-                        "Google search queries:"
-                    )
-
-                    for search_query in queries:
-                        print(
-                            f"  - {search_query}"
-                        )
-
-        except Exception as error:
-            print(
-                "Gemini grounding diagnostics failed:"
-            )
-            print(
-                f"{type(error).__name__}: {error}"
-            )
+        return SearchResult(**values)

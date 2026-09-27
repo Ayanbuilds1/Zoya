@@ -25,11 +25,19 @@ from app.config import (
 
 # How long one provider is allowed to block the current request
 # before FailoverAIProvider moves to the next provider.
-PROVIDER_REQUEST_TIMEOUT_SECONDS = 20
+PROVIDER_REQUEST_TIMEOUT_SECONDS = 12
 
 # Failed providers that hit quota/rate-limit stay skipped for this
 # amount of time for future requests.
 PROVIDER_COOLDOWN_SECONDS = 60
+
+# Short cooldown for transient provider failures (timeouts, empty streams,
+# network errors). This prevents Zoya from paying the same 12s timeout again
+# on the next request while still recovering much faster than quota cooldowns.
+TRANSIENT_PROVIDER_COOLDOWN_SECONDS = 15
+
+# Invalid credentials/config should not be retried on every message.
+CONFIG_PROVIDER_COOLDOWN_SECONDS = 300
 
 
 # Shared cooldown state across all FailoverAIProvider instances.
@@ -162,6 +170,55 @@ class FailoverAIProvider(AIProvider):
         _PROVIDER_COOLDOWNS[name] = (
             time.time() + PROVIDER_COOLDOWN_SECONDS
         )
+
+    @staticmethod
+    def _set_failure_cooldown(
+        name: str,
+        category: str,
+        error: Exception,
+    ) -> float:
+        """Apply the right cooldown for a provider failure."""
+        if category == "rate_limit":
+            retry_after = FailoverAIProvider._retry_after_seconds(error)
+            seconds = (
+                retry_after
+                if retry_after is not None
+                else float(PROVIDER_COOLDOWN_SECONDS)
+            )
+        elif category == "auth/config":
+            seconds = float(CONFIG_PROVIDER_COOLDOWN_SECONDS)
+        else:
+            seconds = float(TRANSIENT_PROVIDER_COOLDOWN_SECONDS)
+
+        _PROVIDER_COOLDOWNS[name] = time.time() + seconds
+        return seconds
+
+    @staticmethod
+    def _retry_after_seconds(error: Exception) -> float | None:
+        """Extract a provider-provided retry duration when available."""
+        error_text = str(error).lower()
+        match = re.search(
+            r"try again in\s+(?:(\d+(?:\.\d+)?)h)?"
+            r"(?:(\d+(?:\.\d+)?)m)?"
+            r"(?:(\d+(?:\.\d+)?)s)?",
+            error_text,
+        )
+
+        if not match:
+            return None
+
+        hours = float(match.group(1) or 0)
+        minutes = float(match.group(2) or 0)
+        seconds = float(match.group(3) or 0)
+        total = (hours * 3600) + (minutes * 60) + seconds
+
+        if total <= 0:
+            return None
+
+        # Add a small buffer so we do not retry a quota-limited provider a
+        # fraction of a second too early. Keep the fallback chain responsive
+        # for future requests even when an upstream message is unreasonable.
+        return min(total + 2.0, 24 * 60 * 60)
 
     @staticmethod
     def _send_to_provider(
@@ -387,16 +444,15 @@ class FailoverAIProvider(AIProvider):
                     f"({category}): {error}"
                 )
 
-                # Rate-limit/quota errors trigger the normal cooldown.
-                # The current request immediately continues to the
-                # next provider.
-                if category == "rate_limit":
-                    self._set_cooldown(name)
-
-                    print(
-                        f"⏳ [AI] {name} cooldown set for "
-                        f"{PROVIDER_COOLDOWN_SECONDS}s."
-                    )
+                cooldown_seconds = self._set_failure_cooldown(
+                    name=name,
+                    category=category,
+                    error=error,
+                )
+                print(
+                    f"⏳ [AI] {name} cooldown set for "
+                    f"{round(cooldown_seconds, 1)}s."
+                )
 
                 # Any provider failure that is safe to fail over from
                 # moves to the next configured provider.
@@ -525,8 +581,15 @@ class FailoverAIProvider(AIProvider):
 
                 category = self._classify_error(error)
                 print(f"⚠️ [AI] {name} stream failed ({category}): {error}")
-                if category == "rate_limit":
-                    self._set_cooldown(name)
+                cooldown_seconds = self._set_failure_cooldown(
+                    name=name,
+                    category=category,
+                    error=error,
+                )
+                print(
+                    f"⏳ [AI] {name} stream cooldown set for "
+                    f"{round(cooldown_seconds, 1)}s."
+                )
 
                 if index < len(self.providers) - 1:
                     print(
@@ -540,5 +603,14 @@ class FailoverAIProvider(AIProvider):
         ) from last_error
 
 
+_AI_PROVIDER_INSTANCE: AIProvider | None = None
+
+
 def create_ai_provider() -> AIProvider:
-    return FailoverAIProvider()
+    """Return the shared provider manager for the current Python process."""
+    global _AI_PROVIDER_INSTANCE
+
+    if _AI_PROVIDER_INSTANCE is None:
+        _AI_PROVIDER_INSTANCE = FailoverAIProvider()
+
+    return _AI_PROVIDER_INSTANCE

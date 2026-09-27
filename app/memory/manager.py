@@ -147,6 +147,151 @@ class MemoryManager:
 
             return list(reversed(messages))
 
+    def get_latest_conversation_id(
+        self,
+        user_id: int,
+    ) -> int | None:
+        with self.SessionLocal() as session:
+            conversation_id = session.scalar(
+                select(Conversation.conversation_id)
+                .where(Conversation.user_id == user_id)
+                .order_by(
+                    Conversation.started_at.desc(),
+                    Conversation.conversation_id.desc(),
+                )
+                .limit(1)
+            )
+
+            return conversation_id
+
+    def get_conversation_for_user(
+        self,
+        user_id: int,
+        conversation_id: int,
+    ) -> Conversation | None:
+        with self.SessionLocal() as session:
+            return session.scalar(
+                select(Conversation).where(
+                    Conversation.user_id == user_id,
+                    Conversation.conversation_id == conversation_id,
+                )
+            )
+
+    def list_conversations(
+        self,
+        user_id: int,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return persisted conversations in sidebar-friendly form."""
+        limit = max(1, min(limit, 200))
+
+        first_user_message = (
+            select(Message.content)
+            .where(
+                Message.conversation_id == Conversation.conversation_id,
+                Message.role == "user",
+            )
+            .order_by(
+                Message.timestamp.asc(),
+                Message.message_id.asc(),
+            )
+            .limit(1)
+            .scalar_subquery()
+        )
+
+        with self.SessionLocal() as session:
+            rows = session.execute(
+                select(
+                    Conversation,
+                    first_user_message.label("first_user_message"),
+                )
+                .where(Conversation.user_id == user_id)
+                .order_by(
+                    Conversation.started_at.desc(),
+                    Conversation.conversation_id.desc(),
+                )
+                .limit(limit)
+            ).all()
+
+            return [
+                {
+                    "conversation_id": conversation.conversation_id,
+                    "title": (
+                        conversation.summary.strip()[:80]
+                        if isinstance(conversation.summary, str) and conversation.summary.strip()
+                        else (
+                            first_message.strip()[:80]
+                            if isinstance(first_message, str) and first_message.strip()
+                            else "New conversation"
+                        )
+                    ),
+                    "started_at": conversation.started_at.isoformat()
+                    if conversation.started_at
+                    else None,
+                    "ended_at": conversation.ended_at.isoformat()
+                    if conversation.ended_at
+                    else None,
+                    "message_count": conversation.message_count,
+                    "summary": conversation.summary,
+                }
+                for conversation, first_message in rows
+            ]
+
+    def rename_conversation(
+        self,
+        user_id: int,
+        conversation_id: int,
+        title: str,
+    ) -> Conversation | None:
+        title = re.sub(r"\s+", " ", title.strip())[:80]
+
+        if not title:
+            raise ValueError("Conversation title cannot be empty.")
+
+        with self.SessionLocal() as session:
+            conversation = session.scalar(
+                select(Conversation).where(
+                    Conversation.user_id == user_id,
+                    Conversation.conversation_id == conversation_id,
+                )
+            )
+
+            if conversation is None:
+                return None
+
+            conversation.summary = title
+            session.commit()
+            session.refresh(conversation)
+            return conversation
+
+    def delete_conversation(
+        self,
+        user_id: int,
+        conversation_id: int,
+    ) -> bool:
+        with self.SessionLocal() as session:
+            conversation = session.scalar(
+                select(Conversation).where(
+                    Conversation.user_id == user_id,
+                    Conversation.conversation_id == conversation_id,
+                )
+            )
+
+            if conversation is None:
+                return False
+
+            session.query(Message).filter(
+                Message.conversation_id == conversation_id
+            ).delete(synchronize_session=False)
+
+            session.query(SessionInteraction).filter(
+                SessionInteraction.conversation_id == conversation_id
+            ).delete(synchronize_session=False)
+
+            session.delete(conversation)
+            session.commit()
+            return True
+
     def save_memory(
         self,
         user_id: int,
@@ -232,13 +377,36 @@ class MemoryManager:
         user_id: int,
         query: str,
         limit: int = 8,
+        include_always_relevant: bool = True,
     ) -> list[Memory]:
-        """Return only turn-relevant memories plus high-priority instructions."""
+        """Return turn-relevant memories with lightweight concept scoring."""
         query_terms = self._terms(query)
         candidates = self.get_memories(
             user_id=user_id,
             min_importance=1,
         )
+
+        # Field-specific cues prevent unrelated memories from matching merely
+        # because they share generic words such as "favorite".
+        field_cues = {
+            "favorite_game": {"game", "sport", "khel"},
+            "favorite_sport": {"game", "sport", "khel"},
+            "favorite_color": {"color", "colour"},
+            "name": {"name", "naam"},
+            "addressing_style": {
+                "aap", "address", "respect", "respectful", "tu", "teri"
+            },
+            "communication_language": {
+                "language", "hinglish", "hindi", "english", "reply"
+            },
+        }
+
+        active_field_cues = {
+            key: cues
+            for key, cues in field_cues.items()
+            if query_terms & cues
+        }
+
         ranked: list[tuple[float, Memory]] = []
 
         for memory in candidates:
@@ -246,28 +414,47 @@ class MemoryManager:
             value_terms = self._terms(memory.value)
             concept_terms = self.CONCEPT_TERMS.get(memory.key, set())
             overlap = len(query_terms & (key_terms | value_terms))
-            concept_match = bool(query_terms & concept_terms)
-            always_relevant = memory.key in self.ALWAYS_RELEVANT_KEYS
+            concept_overlap = len(query_terms & concept_terms)
+            always_relevant = (
+                include_always_relevant
+                and memory.key in self.ALWAYS_RELEVANT_KEYS
+            )
 
-            if not (overlap or concept_match or always_relevant):
+            # When the query contains a field-specific cue, unrelated fields
+            # should not surface merely because they share "favorite".
+            if active_field_cues:
+                matching_field = False
+                memory_cues = field_cues.get(memory.key, set())
+                if memory_cues and query_terms & memory_cues:
+                    matching_field = True
+                elif memory.key in self.ALWAYS_RELEVANT_KEYS and always_relevant:
+                    matching_field = True
+
+                if not matching_field:
+                    continue
+
+            if not (overlap or concept_overlap or always_relevant):
                 continue
 
-            score = overlap * 10 + (8 if concept_match else 0)
+            score = overlap * 12 + concept_overlap * 8
             score += memory.importance / 10
             if always_relevant:
                 score += 6
+
             ranked.append((score, memory))
 
         ranked.sort(
             key=lambda item: (
-                item[0],
-                item[1].importance,
-                item[1].updated_at,
-            ),
-            reverse=True,
+                -item[0],
+                -item[1].importance,
+                -item[1].updated_at.timestamp() if item[1].updated_at else 0,
+            )
         )
 
-        return [memory for _, memory in ranked[:max(1, limit)]]
+        return [
+            memory
+            for _, memory in ranked[: max(1, min(limit, 50))]
+        ]
 
     # ------------------------------------------------------------------
     # Phase 7 - Memory UI / CRUD methods

@@ -19,6 +19,8 @@ class OpenRouterService(AIProvider):
         self.client = OpenAI(
             api_key=OPENROUTER_API_KEY,
             base_url="https://openrouter.ai/api/v1",
+            timeout=20.0,
+            max_retries=0,
         )
 
     def send_message(
