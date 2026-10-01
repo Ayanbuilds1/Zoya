@@ -1341,13 +1341,58 @@ Return exactly this JSON shape:
             if isinstance(tool, dict) and tool.get("name")
         }
 
-        if tool_needed and (
-            not tool_name
-            or tool_name not in available_tool_names
-        ):
-            tool_needed = False
-            tool_name = ""
-            tool_arguments = {}
+        tool_argument_error = ""
+
+        if tool_needed:
+            selected_manifest = next(
+                (
+                    tool
+                    for tool in self.tool_catalog
+                    if isinstance(tool, dict)
+                    and str(tool.get("name", "")).strip() == tool_name
+                ),
+                None,
+            )
+
+            if selected_manifest is not None:
+                schema = selected_manifest.get("input_schema")
+                if isinstance(schema, dict):
+                    required = schema.get("required", [])
+                    if isinstance(required, (list, tuple)):
+                        missing = []
+                        for key in required:
+                            if key not in tool_arguments:
+                                missing.append(str(key))
+                                continue
+                            value = tool_arguments.get(key)
+                            if value is None:
+                                missing.append(str(key))
+                                continue
+                            if isinstance(value, str) and not value.strip():
+                                missing.append(str(key))
+
+                        if missing:
+                            tool_argument_error = (
+                                f"Required tool input missing: {', '.join(missing)}"
+                            )
+
+                    properties = schema.get("properties", {})
+                    if not tool_argument_error and isinstance(properties, dict):
+                        invalid_enum = None
+                        for key, spec in properties.items():
+                            if key not in tool_arguments or not isinstance(spec, dict):
+                                continue
+                            allowed = spec.get("enum")
+                            if isinstance(allowed, list) and tool_arguments[key] not in allowed:
+                                invalid_enum = (key, allowed)
+                                break
+
+                        if invalid_enum is not None:
+                            key, allowed = invalid_enum
+                            tool_argument_error = (
+                                f"Invalid value for {key}. Allowed values: "
+                                + ", ".join(str(item) for item in allowed)
+                            )
 
         if not tool_needed and intent == "tool":
             intent = fallback.intent
@@ -1417,6 +1462,14 @@ Return exactly this JSON shape:
                 fallback.response_plan.needs_step_by_step,
             )
         )
+
+        if tool_argument_error and tool_needed:
+            needs_clarification = True
+            clarification_question = (
+                "Tool action complete karne ke liye "
+                + tool_argument_error
+                + "."
+            )
 
         if needs_clarification:
             research_needed = False

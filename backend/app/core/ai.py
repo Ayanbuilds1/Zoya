@@ -7,6 +7,7 @@ from typing import Any
 
 from app.ai.claude import ClaudeService
 from app.ai.gemini import GeminiService
+from app.ai.freellmapi import FreeLLMAPIError, FreeLLMAPIService
 from app.ai.groq import GroqService
 from app.ai.openai import OpenAIService
 from app.ai.openrouter import OpenRouterService
@@ -16,6 +17,9 @@ from app.config import (
     AI_FALLBACK_PROVIDERS,
     ANTHROPIC_API_KEY,
     GEMINI_API_KEY,
+    FREELLMAPI_API_KEY,
+    FREELLMAPI_GATEWAY_COOLDOWN_SECONDS,
+    FREELLMAPI_REQUEST_TIMEOUT_SECONDS,
     GROQ_API_KEY,
     OPENAI_API_KEY,
     OPENROUTER_API_KEY,
@@ -75,6 +79,11 @@ def _create_provider(name: str) -> AIProvider | None:
 
     name = name.strip().lower()
 
+    if name == "freellmapi":
+        if not FREELLMAPI_API_KEY:
+            return None
+        return FreeLLMAPIService()
+
     if name == "gemini":
         if not GEMINI_API_KEY:
             return None
@@ -109,7 +118,7 @@ class FailoverAIProvider(AIProvider):
 
     Intended order for the current Zoya setup:
 
-        Groq -> Gemini -> OpenRouter
+        FreeLLMAPI -> direct Groq -> direct Gemini -> direct OpenRouter
 
     Conversation history is accepted here so the manager remains
     compatible with the conversation-aware AIProvider interface.
@@ -170,6 +179,12 @@ class FailoverAIProvider(AIProvider):
         _PROVIDER_COOLDOWNS[name] = (
             time.time() + PROVIDER_COOLDOWN_SECONDS
         )
+
+    @staticmethod
+    def _set_gateway_cooldown(name: str) -> float:
+        seconds = max(1.0, float(FREELLMAPI_GATEWAY_COOLDOWN_SECONDS))
+        _PROVIDER_COOLDOWNS[name] = time.time() + seconds
+        return seconds
 
     @staticmethod
     def _set_failure_cooldown(
@@ -332,6 +347,15 @@ class FailoverAIProvider(AIProvider):
         return "unknown"
 
     @staticmethod
+    def _provider_timeout_seconds(provider: AIProvider) -> float:
+        if isinstance(provider, FreeLLMAPIService):
+            return max(
+                float(FREELLMAPI_REQUEST_TIMEOUT_SECONDS),
+                float(PROVIDER_REQUEST_TIMEOUT_SECONDS),
+            )
+        return float(PROVIDER_REQUEST_TIMEOUT_SECONDS)
+
+    @staticmethod
     def _run_with_timeout(
         provider: AIProvider,
         message: str,
@@ -357,7 +381,7 @@ class FailoverAIProvider(AIProvider):
 
         try:
             return future.result(
-                timeout=PROVIDER_REQUEST_TIMEOUT_SECONDS
+                timeout=FailoverAIProvider._provider_timeout_seconds(provider)
             )
 
         except concurrent.futures.TimeoutError as error:
@@ -365,7 +389,7 @@ class FailoverAIProvider(AIProvider):
 
             raise TimeoutError(
                 "Provider request timed out after "
-                f"{PROVIDER_REQUEST_TIMEOUT_SECONDS}s."
+                f"{FailoverAIProvider._provider_timeout_seconds(provider)}s."
             ) from error
 
         finally:
@@ -407,14 +431,10 @@ class FailoverAIProvider(AIProvider):
 
         for index, (name, provider) in enumerate(self.providers):
             if self._is_on_cooldown(name):
-                print(
-                    f"⏳ {name} is on cooldown. Skipping..."
-                )
+                print(f"⏳ {name} is on cooldown. Skipping...")
                 continue
 
-            print(
-                f"🤖 [AI] Trying provider: {name}"
-            )
+            print(f"🤖 [AI] Trying provider: {name}")
 
             try:
                 response = self._run_with_timeout(
@@ -428,11 +448,40 @@ class FailoverAIProvider(AIProvider):
 
                 self.active_provider = name
 
+                print(f"✅ [AI] {name} responded successfully.")
+                return response
+
+            except FreeLLMAPIError as error:
+                last_error = error
+
                 print(
-                    f"✅ [AI] {name} responded successfully."
+                    f"⚠️ [AI] {name} failed "
+                    f"(freellmapi:{error.kind}): {error}"
                 )
 
-                return response
+                # Direct providers are used only when the gateway itself is
+                # unavailable. A reachable gateway must retain ownership of
+                # upstream routing decisions.
+                if error.kind == "gateway_unavailable":
+                    cooldown_seconds = self._set_gateway_cooldown(name)
+                    print(
+                        f"⏳ [AI] {name} gateway cooldown set for "
+                        f"{round(cooldown_seconds, 1)}s."
+                    )
+
+                    if index < len(self.providers) - 1:
+                        next_name = self.providers[index + 1][0]
+                        print(
+                            f"➡️ [AI] Gateway unavailable; direct fallback: "
+                            f"{name} -> {next_name}"
+                        )
+                        continue
+
+                print(
+                    f"❌ [AI] {name} is terminal for this request; "
+                    "direct provider bypass is not allowed."
+                )
+                break
 
             except Exception as error:
                 last_error = error
@@ -454,29 +503,25 @@ class FailoverAIProvider(AIProvider):
                     f"{round(cooldown_seconds, 1)}s."
                 )
 
-                # Any provider failure that is safe to fail over from
-                # moves to the next configured provider.
-                has_next_provider = (
-                    index < len(self.providers) - 1
-                )
-
-                if has_next_provider:
+                if index < len(self.providers) - 1:
                     next_name = self.providers[index + 1][0]
-
                     print(
                         f"➡️ [AI] Falling back from "
                         f"{name} -> {next_name}"
                     )
-
                     continue
 
-                print(
-                    f"❌ [AI] No remaining providers after {name}."
-                )
+                print(f"❌ [AI] No remaining providers after {name}.")
+
+        if isinstance(last_error, FreeLLMAPIError):
+            raise RuntimeError(
+                str(last_error)
+            ) from last_error
 
         raise RuntimeError(
             "All configured AI providers are currently unavailable."
         ) from last_error
+
 
     @staticmethod
     def _stream_from_provider(
@@ -503,17 +548,20 @@ class FailoverAIProvider(AIProvider):
             return iter(provider.stream_message(message))
 
     @staticmethod
-    def _next_stream_chunk(iterator: Iterator[str]) -> str:
+    def _next_stream_chunk(
+        iterator: Iterator[str],
+        timeout_seconds: float = PROVIDER_REQUEST_TIMEOUT_SECONDS,
+    ) -> str:
         """Bound waiting for a native stream's next item before exposure."""
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = executor.submit(next, iterator)
         try:
-            return future.result(timeout=PROVIDER_REQUEST_TIMEOUT_SECONDS)
+            return future.result(timeout=timeout_seconds)
         except concurrent.futures.TimeoutError as error:
             future.cancel()
             raise TimeoutError(
                 "Provider stream did not produce a chunk within "
-                f"{PROVIDER_REQUEST_TIMEOUT_SECONDS}s."
+                f"{timeout_seconds}s."
             ) from error
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -523,12 +571,8 @@ class FailoverAIProvider(AIProvider):
         message: str,
         conversation_history: list[dict[str, str]] | None = None,
     ) -> Iterator[str]:
-        """Forward native provider chunks and fail over only before output.
+        """Forward native provider chunks and fail over before visible output."""
 
-        Once a chunk is visible, restarting on another model could duplicate
-        the reply. In that case the caller receives a controlled stream error
-        and retains the already displayed partial text.
-        """
         last_error: Exception | None = None
 
         for index, (name, provider) in enumerate(self.providers):
@@ -537,6 +581,7 @@ class FailoverAIProvider(AIProvider):
                 continue
 
             exposed_output = False
+
             try:
                 print(f"🤖 [AI] Trying provider stream: {name}")
                 iterator = self._stream_from_provider(
@@ -548,11 +593,15 @@ class FailoverAIProvider(AIProvider):
                 first_chunk = ""
                 while not first_chunk:
                     try:
-                        first_chunk = self._next_stream_chunk(iterator)
+                        first_chunk = self._next_stream_chunk(
+                            iterator,
+                            timeout_seconds=self._provider_timeout_seconds(provider),
+                        )
                     except StopIteration as error:
                         raise RuntimeError(
                             "Provider returned an empty streamed response."
                         ) from error
+
                     if first_chunk is None:
                         first_chunk = ""
                     elif not isinstance(first_chunk, str):
@@ -572,15 +621,52 @@ class FailoverAIProvider(AIProvider):
                 print(f"✅ [AI] {name} stream completed.")
                 return
 
+            except FreeLLMAPIError as error:
+                last_error = error
+
+                if exposed_output:
+                    raise RuntimeError(
+                        "The provider stream ended before Zoya could finish."
+                    ) from error
+
+                print(
+                    f"⚠️ [AI] {name} stream failed "
+                    f"(freellmapi:{error.kind}): {error}"
+                )
+
+                if error.kind == "gateway_unavailable":
+                    cooldown_seconds = self._set_gateway_cooldown(name)
+                    print(
+                        f"⏳ [AI] {name} gateway cooldown set for "
+                        f"{round(cooldown_seconds, 1)}s."
+                    )
+
+                    if index < len(self.providers) - 1:
+                        print(
+                            f"➡️ [AI] Gateway unavailable; direct stream fallback: "
+                            f"{name} -> {self.providers[index + 1][0]}"
+                        )
+                        continue
+
+                print(
+                    f"❌ [AI] {name} stream is terminal for this request; "
+                    "direct provider bypass is not allowed."
+                )
+                break
+
             except Exception as error:
                 last_error = error
+
                 if exposed_output:
                     raise RuntimeError(
                         "The provider stream ended before Zoya could finish."
                     ) from error
 
                 category = self._classify_error(error)
-                print(f"⚠️ [AI] {name} stream failed ({category}): {error}")
+                print(
+                    f"⚠️ [AI] {name} stream failed ({category}): {error}"
+                )
+
                 cooldown_seconds = self._set_failure_cooldown(
                     name=name,
                     category=category,
@@ -597,6 +683,11 @@ class FailoverAIProvider(AIProvider):
                         f"{name} -> {self.providers[index + 1][0]}"
                     )
                     continue
+
+        if isinstance(last_error, FreeLLMAPIError):
+            raise RuntimeError(
+                str(last_error)
+            ) from last_error
 
         raise RuntimeError(
             "All configured AI providers are currently unavailable."

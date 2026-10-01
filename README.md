@@ -1,75 +1,40 @@
-# Zoya Clean Baseline v1
+# Zoya Brain + Final Prompt Fix
 
-This is a **drop-in recovery baseline** for the current Zoya project.
+## What this fixes
 
-Goal: restore the known-good rich frontend and align the conversation/memory API **without replacing Zoya's current AI/research core logic**.
+1. Simple stable questions no longer trigger a separate AI Brain reasoning call.
+2. Fast-path requests no longer inject all persistent memories into the final answer prompt.
+3. Brain guidance sent to the final model no longer exposes raw fields such as `Intent`, `User goal`, and `Confidence`.
+4. Context-dependent, personal-memory, current/research, tool/action, correction, and complex requests keep the full Brain path.
+5. Existing research, tools, memory extraction, provider fallback, and streaming flow remain in place.
 
-## Files replaced
+## Files to replace
 
-- `frontend/src/App.jsx`
-- `frontend/src/App.css`
-- `frontend/src/index.css`
-- `backend/app/core/chat.py`
-- `backend/app/memory/manager.py`
-- `backend/app/api/routes/chat.py`
+Replace only:
 
-## What is intentionally NOT changed
+- `C:\Users\Ayan\Zoya\backend\app\core\brain.py`
+- `C:\Users\Ayan\Zoya\backend\app\core\chat.py`
 
-- `backend/app/core/ai.py`
-- `backend/app/core/brain.py`
-- `backend/app/research/*`
-- `backend/app/ai/*`
-- `.env`
-- SQLite/database files
-- frontend component/hook files outside the three listed frontend files
+Optional test file:
 
-## Restored frontend behavior
+- `C:\Users\Ayan\Zoya\backend\tests\test_brain_fast_path.py`
 
-- sidebar
-- recent conversations
-- pinned chats
-- collapse/expand sidebar
-- chat search
-- New Chat
-- conversation switching
-- rename/delete conversation
-- edit user message
-- copy response
-- Read Aloud
-- retry
-- per-message sources
-- existing Memory view (single sidebar entry)
-- original welcome screen
-- proper composer sizing
-- responsive behavior
+## Expected behavior
 
-## Backend alignment
+For `What is JSON?` the terminal should show the fast-path message and only one FreeLLMAPI call for the final answer:
 
-- memory retrieval supports `include_always_relevant`
-- conversation listing works
-- New Chat creates a real persisted conversation
-- conversation rename/delete works
-- active conversation state is cleared on deletion
-- current chat/research/provider logic is preserved from the current chat-service snapshot
+`⚡ [Brain] Simple standalone request: semantic AI reasoning skipped.`
 
-## Safety
+For personal/contextual requests such as `Mere friend ka name kya hai?`, `What about it?`, or research/current requests, the normal Brain reasoning path remains enabled.
 
-The included `APPLY_RECOVERY.ps1` creates a timestamped backup of every file it replaces before copying anything.
-It does **not** touch `.env` or the database.
+## Validation
 
-## Start commands
+From `C:\Users\Ayan\Zoya\backend` with the project virtual environment active:
 
-Backend:
+`python tests\\test_brain_fast_path.py`
 
-```powershell
-uvicorn app.api.main:app --host 127.0.0.1 --port 8000 --reload
-```
+Then restart the backend with the existing working command:
 
-Frontend:
+`uvicorn app.api.main:app --host 127.0.0.1 --port 8000 --reload`
 
-```powershell
-npm run dev
-```
-
-
-
+No `.ps1` files are required.

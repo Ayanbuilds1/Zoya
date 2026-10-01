@@ -1,0 +1,102 @@
+/* =========================================================
+   ZOYA THEME FOUNDATION
+========================================================= */
+
+:root {
+  color-scheme: dark;
+
+  --zoya-bg: #0b0b0f;
+  --zoya-sidebar-bg: #0d0d12;
+  --zoya-surface: #121217;
+  --zoya-surface-2: #15151b;
+  --zoya-surface-3: #17171d;
+  --zoya-surface-4: #1b1b22;
+  --zoya-surface-hover: #202027;
+  --zoya-surface-active: #222229;
+  --zoya-code-bg: #0d0d11;
+
+  --zoya-text: #f5f5f7;
+  --zoya-text-strong: #ffffff;
+  --zoya-text-muted: #8f8f9a;
+  --zoya-text-soft: #777783;
+  --zoya-text-faint: #5f5f69;
+  --zoya-text-placeholder: #696974;
+  --zoya-link: #b9b9ff;
+
+  --zoya-border: rgba(255, 255, 255, 0.08);
+  --zoya-border-soft: rgba(255, 255, 255, 0.06);
+  --zoya-border-strong: rgba(255, 255, 255, 0.14);
+
+  --zoya-shadow: rgba(0, 0, 0, 0.35);
+  --zoya-overlay: rgba(0, 0, 0, 0.58);
+
+  /* Existing shell variables are kept compatible with the current App.css. */
+  --shell-bg: var(--zoya-bg);
+  --sidebar-bg: var(--zoya-sidebar-bg);
+  --panel-bg: var(--zoya-surface);
+  --panel-hover: var(--zoya-surface-hover);
+  --border-soft: var(--zoya-border);
+  --border-strong: var(--zoya-border-strong);
+  --text-main: var(--zoya-text);
+  --text-muted: var(--zoya-text-muted);
+  --text-soft: var(--zoya-text-soft);
+}
+
+html[data-theme-mode="light"] {
+  color-scheme: light;
+
+  --zoya-bg: #f5f7fa;
+  --zoya-sidebar-bg: #ffffff;
+  --zoya-surface: #ffffff;
+  --zoya-surface-2: #f0f2f5;
+  --zoya-surface-3: #edf0f4;
+  --zoya-surface-4: #e7ebf0;
+  --zoya-surface-hover: #e3e7ec;
+  --zoya-surface-active: #dfe4ea;
+  --zoya-code-bg: #f3f5f8;
+
+  --zoya-text: #1a1d22;
+  --zoya-text-strong: #0b0d10;
+  --zoya-text-muted: #5f6670;
+  --zoya-text-soft: #707984;
+  --zoya-text-faint: #8b939d;
+  --zoya-text-placeholder: #8b939d;
+  --zoya-link: #5146b8;
+
+  --zoya-border: rgba(15, 23, 42, 0.10);
+  --zoya-border-soft: rgba(15, 23, 42, 0.065);
+  --zoya-border-strong: rgba(15, 23, 42, 0.16);
+
+  --zoya-shadow: rgba(15, 23, 42, 0.12);
+  --zoya-overlay: rgba(15, 23, 42, 0.42);
+
+  --shell-bg: var(--zoya-bg);
+  --sidebar-bg: var(--zoya-sidebar-bg);
+  --panel-bg: var(--zoya-surface);
+  --panel-hover: var(--zoya-surface-hover);
+  --border-soft: var(--zoya-border);
+  --border-strong: var(--zoya-border-strong);
+  --text-main: var(--zoya-text);
+  --text-muted: var(--zoya-text-muted);
+  --text-soft: var(--zoya-text-soft);
+}
+
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition:
+    background-color 220ms ease,
+    color 220ms ease,
+    border-color 220ms ease,
+    box-shadow 220ms ease,
+    fill 220ms ease,
+    stroke 220ms ease !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.theme-switching *,
+  html.theme-switching *::before,
+  html.theme-switching *::after {
+    transition-duration: 1ms !important;
+  }
+}

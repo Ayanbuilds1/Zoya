@@ -154,11 +154,14 @@ async def list_conversations(
     limit = max(1, min(limit, 200))
 
     try:
+        conversations = chat_service.list_conversations(
+            user_id=user_id,
+            limit=limit,
+        )
+
         return {
-            "conversations": chat_service.list_conversations(
-                user_id=user_id,
-                limit=limit,
-            )
+            "conversations": conversations,
+            "total_count": chat_service.count_conversations(user_id),
         }
     except Exception as error:
         print("\n❌ CONVERSATIONS LIST ERROR")

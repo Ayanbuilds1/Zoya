@@ -135,6 +135,66 @@ class ToolExecutor:
                 manifest=manifest_dict,
             )
 
+        schema = manifest.input_schema
+        if isinstance(schema, Mapping):
+            required = schema.get("required", [])
+            if isinstance(required, (list, tuple)):
+                missing: list[str] = []
+                for key in required:
+                    if key not in request.arguments:
+                        missing.append(str(key))
+                        continue
+                    value = request.arguments.get(key)
+                    if value is None:
+                        missing.append(str(key))
+                    elif isinstance(value, str) and not value.strip():
+                        missing.append(str(key))
+                if missing:
+                    return ToolExecutionResult(
+                        status="failed",
+                        tool_name=request.tool_name,
+                        reason_code="missing_arguments",
+                        message=(
+                            "Required tool input missing: "
+                            + ", ".join(missing)
+                        ),
+                        manifest=manifest_dict,
+                        tool_result=ToolResult.fail(
+                            tool_name=request.tool_name,
+                            code="missing_arguments",
+                            message=(
+                                "Required tool input missing: "
+                                + ", ".join(missing)
+                            ),
+                        ),
+                    )
+
+            properties = schema.get("properties", {})
+            if isinstance(properties, Mapping):
+                for key, spec in properties.items():
+                    if key not in request.arguments or not isinstance(spec, Mapping):
+                        continue
+                    allowed = spec.get("enum")
+                    if isinstance(allowed, (list, tuple)) and request.arguments.get(key) not in allowed:
+                        return ToolExecutionResult(
+                            status="failed",
+                            tool_name=request.tool_name,
+                            reason_code="invalid_argument",
+                            message=(
+                                f"Invalid value for {key}. Allowed values: "
+                                + ", ".join(str(item) for item in allowed)
+                            ),
+                            manifest=manifest_dict,
+                            tool_result=ToolResult.fail(
+                                tool_name=request.tool_name,
+                                code="invalid_argument",
+                                message=(
+                                    f"Invalid value for {key}. Allowed values: "
+                                    + ", ".join(str(item) for item in allowed)
+                                ),
+                            ),
+                        )
+
         needs_confirmation = (
             manifest.requires_confirmation
             or permission in self.policy.require_confirmation_for_permissions

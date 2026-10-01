@@ -18,14 +18,14 @@ DB_PATH = os.getenv("DB_PATH", "zoya.db")
 # AI provider settings
 PRIMARY_AI_PROVIDER = os.getenv(
     "PRIMARY_AI_PROVIDER",
-    "gemini",
+    "freellmapi",
 ).lower()
 
 AI_FALLBACK_PROVIDERS = [
     provider.strip().lower()
     for provider in os.getenv(
         "AI_FALLBACK_PROVIDERS",
-        "groq,openrouter",
+        "groq,gemini,openrouter",
     ).split(",")
     if provider.strip()
 ]
@@ -33,6 +33,64 @@ AI_FALLBACK_PROVIDERS = [
 
 # Discord
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
+
+# FreeLLMAPI unified text gateway
+FREELLMAPI_BASE_URL = os.getenv(
+    "FREELLMAPI_BASE_URL",
+    "http://127.0.0.1:31415/v1",
+).rstrip("/")
+
+FREELLMAPI_API_KEY = os.getenv(
+    "FREELLMAPI_API_KEY"
+)
+FREELLMAPI_CHAT_MODEL = os.getenv(
+    "FREELLMAPI_CHAT_MODEL",
+    "auto",
+)
+FREELLMAPI_MAX_TOKENS = int(
+    os.getenv(
+        "FREELLMAPI_MAX_TOKENS",
+        "2048",
+    )
+)
+FREELLMAPI_REQUEST_TIMEOUT_SECONDS = float(
+    os.getenv(
+        "FREELLMAPI_REQUEST_TIMEOUT_SECONDS",
+        "45",
+    )
+)
+FREELLMAPI_STREAM_REQUEST_TIMEOUT_SECONDS = float(
+    os.getenv(
+        "FREELLMAPI_STREAM_REQUEST_TIMEOUT_SECONDS",
+        "15",
+    )
+)
+FREELLMAPI_GATEWAY_COOLDOWN_SECONDS = float(
+    os.getenv(
+        "FREELLMAPI_GATEWAY_COOLDOWN_SECONDS",
+        "30",
+    )
+)
+FREELLMAPI_NATIVE_STREAM = (
+    os.getenv(
+        "FREELLMAPI_NATIVE_STREAM",
+        "false",
+    ).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+FREELLMAPI_STREAM_CHUNK_CHARS = int(
+    os.getenv(
+        "FREELLMAPI_STREAM_CHUNK_CHARS",
+        "32",
+    )
+)
+FREELLMAPI_STREAM_CHUNK_DELAY_MS = float(
+    os.getenv(
+        "FREELLMAPI_STREAM_CHUNK_DELAY_MS",
+        "8",
+    )
+)
 
 
 # AI API keys
@@ -72,6 +130,11 @@ if not DISCORD_TOKEN:
     raise RuntimeError(
         "DISCORD_TOKEN is missing. "
         "Please add it to the .env file."
+    )
+
+if PRIMARY_AI_PROVIDER == "freellmapi" and not FREELLMAPI_API_KEY:
+    raise RuntimeError(
+        "FREELLMAPI_API_KEY is missing while FreeLLMAPI is the primary AI provider."
     )
 
 if PRIMARY_AI_PROVIDER == "gemini" and not GEMINI_API_KEY:

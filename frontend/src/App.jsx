@@ -6,6 +6,17 @@ import remarkGfm from "remark-gfm";
 
 import rehypeRaw from "rehype-raw";
 
+import { API_BASE_URL } from "./services/api";
+import { streamChat } from "./services/chatService";
+
+import {
+  createConversation,
+  deleteConversation as deleteConversationRequest,
+  getConversationHistory,
+  listConversations,
+  renameConversation,
+} from "./services/conversationService";
+
 import MemoryCategoryFilter from "./components/MemoryCategoryFilter";
 
 import MemoryCreateForm from "./components/MemoryCreateForm";
@@ -15,12 +26,110 @@ import MemoryEditModal from "./components/MemoryEditModal";
 import MemoryList from "./components/MemoryList";
 
 import { useMemory } from "./hooks/useMemory";
+import { useTheme } from "./hooks/useTheme";
+import ThemeSwitcher from "./components/ThemeSwitcher";
+import AiStatusIndicator from "./components/AiStatusIndicator";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 
 import "./App.css";
 
-const API_BASE_URL = "http://127.0.0.1:8000";
-
 const MAX_MESSAGE_LENGTH = 12000;
+
+const getCodeBlockText = (children) => {
+  const parts = [];
+
+  const collect = (node) => {
+    if (node == null) return;
+    if (typeof node === "string" || typeof node === "number") {
+      parts.push(String(node));
+      return;
+    }
+    if (Array.isArray(node)) {
+      node.forEach(collect);
+      return;
+    }
+    if (node?.props?.children !== undefined) {
+      collect(node.props.children);
+    }
+  };
+
+  collect(children);
+  return parts.join("").replace(/\n$/, "");
+};
+
+const CodeBlock = ({ children }) => {
+  const [copied, setCopied] = useState(false);
+  const codeText = getCodeBlockText(children);
+  const languageClass = children?.props?.className || "";
+  const language = languageClass.startsWith("language-")
+    ? languageClass.replace("language-", "")
+    : "code";
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(codeText);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return (
+    <div className="message-code-wrap">
+      <div className="message-code-toolbar">
+        <span className="message-code-language">{language}</span>
+        <button
+          type="button"
+          className="message-code-copy"
+          onClick={handleCopy}
+          aria-label={copied ? "Code copied" : "Copy code"}
+          title={copied ? "Copied" : "Copy code"}
+        >
+          {copied ? "✓ Copied" : "Copy"}
+        </button>
+      </div>
+      <pre>{children}</pre>
+    </div>
+  );
+};
+
+const shouldShowThinkingForRequest = (message = "") => {
+  const normalized = message.trim().toLowerCase();
+
+  if (!normalized) {
+    return false;
+  }
+
+  const explicitComplexity = [
+    "research",
+    "research karke",
+    "research kar ke",
+    "detail me",
+    "detail mein",
+    "detailed",
+    "analyze",
+    "analyse",
+    "compare",
+    "comparison",
+    "latest",
+    "current information",
+    "deep dive",
+    "step by step",
+    "pros and cons",
+    "advantages and disadvantages",
+    "summarize",
+    "summary",
+  ];
+
+  if (explicitComplexity.some((term) => normalized.includes(term))) {
+    return true;
+  }
+
+  // Ordinary short conversational/factual requests should feel immediate.
+  const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+  return wordCount >= 9;
+};
 
 const createInitialResearchState = () => ({
 
@@ -374,7 +483,33 @@ const normalizeResearchMarkdown = (content) => {
 
 };
 
+const escapeRegExp = (value) =>
+  String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const highlightConversationTitle = (title, query) => {
+  const text = String(title || "");
+  const needle = String(query || "").trim();
+
+  if (!needle) {
+    return <span>{text}</span>;
+  }
+
+  const parts = text.split(new RegExp(`(${escapeRegExp(needle)})`, "ig"));
+
+  return parts.map((part, index) =>
+    part.toLowerCase() === needle.toLowerCase() ? (
+      <mark key={`${part}-${index}`} className="conversation-search-match">
+        {part}
+      </mark>
+    ) : (
+      <span key={`${part}-${index}`}>{part}</span>
+    )
+  );
+};
+
 function App() {
+
+  const { theme, setTheme } = useTheme();
 
   const [messages, setMessages] = useState([]);
 
@@ -392,6 +527,14 @@ function App() {
 
     useState(true);
 
+  const [switchingConversationId, setSwitchingConversationId] =
+
+    useState(null);
+
+  const [switchingConversationTitle, setSwitchingConversationTitle] =
+
+    useState("");
+
   const [errorMessage, setErrorMessage] =
 
     useState("");
@@ -402,6 +545,9 @@ function App() {
 
   const [conversations, setConversations] =
     useState([]);
+
+  const [conversationCount, setConversationCount] =
+    useState(0);
 
   const [isLoadingConversations, setIsLoadingConversations] =
     useState(true);
@@ -480,6 +626,10 @@ function App() {
 
     );
 
+  const [aiStatusVisible, setAiStatusVisible] =
+
+    useState(false);
+
   const [copiedMessageIndex, setCopiedMessageIndex] =
 
     useState(null);
@@ -494,6 +644,11 @@ function App() {
 
   const textareaRef = useRef(null);
 
+  const chatSearchInputRef = useRef(null);
+  const conversationMenuFirstActionRef = useRef(null);
+  const conversationMenuTriggerRefs = useRef(new Map());
+  const lastConversationMenuIdRef = useRef(null);
+
   const abortControllerRef = useRef(null);
 
   const researchSourcesRef = useRef([]);
@@ -505,6 +660,8 @@ function App() {
   const selectionPointerRef = useRef({ clientY: 0 });
 
   const isNearBottomRef = useRef(true);
+
+  const conversationScrollPositionsRef = useRef(new Map());
 
   const {
 
@@ -546,6 +703,22 @@ function App() {
 
   useEffect(() => {
 
+    try {
+      const stored = window.sessionStorage.getItem("zoya:conversation-scroll");
+      const parsed = stored ? JSON.parse(stored) : {};
+      if (parsed && typeof parsed === "object") {
+        Object.entries(parsed).forEach(([id, value]) => {
+          const numericId = Number(id);
+          const numericValue = Number(value);
+          if (Number.isFinite(numericId) && Number.isFinite(numericValue)) {
+            conversationScrollPositionsRef.current.set(numericId, numericValue);
+          }
+        });
+      }
+    } catch {
+      // Ignore session storage failures.
+    }
+
     loadConversations();
     loadHistory();
 
@@ -555,6 +728,35 @@ function App() {
     };
 
   }, []);
+
+  useEffect(() => {
+    const conversationTitle =
+      conversations.find(
+        (conversation) => conversation.conversation_id === conversationId
+      )?.title;
+
+    if (isStreaming) {
+      document.title = researchState.active
+        ? "Zoya — Researching…"
+        : "Zoya — Responding…";
+      return;
+    }
+
+    if (activeView === "memory") {
+      document.title = "Zoya — Memory";
+      return;
+    }
+
+    document.title = conversationTitle
+      ? `Zoya — ${conversationTitle}`
+      : "Zoya";
+  }, [
+    activeView,
+    conversationId,
+    conversations,
+    isStreaming,
+    researchState.active,
+  ]);
 
   useEffect(() => {
 
@@ -572,7 +774,79 @@ function App() {
   }, [messages, isStreaming, researchState.active, researchState.completed]);
 
   useEffect(() => {
+    let timeoutId;
 
+    if (!isStreaming) {
+      setAiStatusVisible(false);
+      return undefined;
+    }
+
+    const latestMessage = messages[messages.length - 1];
+
+    if (latestMessage?.role === "assistant") {
+      setAiStatusVisible(false);
+      return undefined;
+    }
+
+    if (researchState.active) {
+      setAiStatusVisible(true);
+      return undefined;
+    }
+
+    const latestUserMessage = [...messages]
+      .reverse()
+      .find((message) => message.role === "user")?.content || "";
+
+    const delay = shouldShowThinkingForRequest(latestUserMessage)
+      ? 420
+      : 220;
+
+    setAiStatusVisible(false);
+    timeoutId = window.setTimeout(() => {
+      setAiStatusVisible(true);
+    }, delay);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [isStreaming, messages, researchState.active]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    const minHeight = 42;
+    const maxHeight = 180;
+
+    textarea.style.height = "auto";
+    const nextHeight = Math.min(
+      Math.max(textarea.scrollHeight, minHeight),
+      maxHeight
+    );
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY =
+      textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [input]);
+
+  useEffect(() => {
+    if (openConversationMenu === null) {
+      const lastId = lastConversationMenuIdRef.current;
+      if (lastId !== null) {
+        requestAnimationFrame(() => {
+          conversationMenuTriggerRefs.current.get(lastId)?.focus();
+        });
+      }
+      return;
+    }
+
+    lastConversationMenuIdRef.current = openConversationMenu;
+
+    requestAnimationFrame(() => {
+      conversationMenuFirstActionRef.current?.focus();
+    });
+  }, [openConversationMenu]);
+
+  useEffect(() => {
     const closeMenu = () => {
       setOpenConversationMenu(null);
     };
@@ -741,6 +1015,56 @@ function App() {
 
   };
 
+  const persistConversationScrollPosition = () => {
+    const container = chatContainerRef.current;
+    if (!container || conversationId === null) {
+      return;
+    }
+
+    conversationScrollPositionsRef.current.set(
+      Number(conversationId),
+      Math.max(0, Math.round(container.scrollTop))
+    );
+
+    try {
+      window.sessionStorage.setItem(
+        "zoya:conversation-scroll",
+        JSON.stringify(
+          Object.fromEntries(conversationScrollPositionsRef.current.entries())
+        )
+      );
+    } catch {
+      // Ignore session storage failures.
+    }
+  };
+
+  const restoreConversationScrollPosition = (targetConversationId) => {
+    const saved = conversationScrollPositionsRef.current.get(
+      Number(targetConversationId)
+    );
+
+    requestAnimationFrame(() => {
+      const container = chatContainerRef.current;
+      if (!container) {
+        return;
+      }
+
+      if (Number.isFinite(saved)) {
+        container.scrollTop = Math.min(
+          saved,
+          Math.max(0, container.scrollHeight - container.clientHeight)
+        );
+        isNearBottomRef.current =
+          container.scrollHeight - container.scrollTop - container.clientHeight < 96;
+        setIsNearBottom(isNearBottomRef.current);
+      } else {
+        container.scrollTop = container.scrollHeight;
+        isNearBottomRef.current = true;
+        setIsNearBottom(true);
+      }
+    });
+  };
+
   const handleChatScroll = () => {
     const container = chatContainerRef.current;
     if (!container) {
@@ -751,6 +1075,10 @@ function App() {
     const nearBottom = distanceFromBottom < 96;
     isNearBottomRef.current = nearBottom;
     setIsNearBottom(nearBottom);
+
+    if (!isLoadingHistory && switchingConversationId === null) {
+      persistConversationScrollPosition();
+    }
   };
 
   const scrollToLatest = () => {
@@ -777,6 +1105,7 @@ function App() {
           String(conversation.title || "").toLowerCase().includes(query)
         )
       : conversations;
+
     return [...visible].sort((a, b) => {
       const aPinned = pinnedConversationIds.includes(a.conversation_id);
       const bPinned = pinnedConversationIds.includes(b.conversation_id);
@@ -784,6 +1113,8 @@ function App() {
       return 0;
     });
   }, [conversations, chatSearch, pinnedConversationIds]);
+
+  const hasChatSearch = chatSearch.trim().length > 0;
 
   const cleanDisplayedContent = (content) => {
     if (!content) return "";
@@ -851,44 +1182,18 @@ function App() {
     setConversationActionError("");
 
     try {
-
-      const response = await fetch(
-        `${API_BASE_URL}/api/chat/conversations/${editingConversation}`,
-        {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            user_id: 1,
-            title,
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null);
-        throw new Error(
-          data?.detail || "Unable to rename conversation."
-        );
-      }
-
+      await renameConversation(editingConversation, title);
       await loadConversations();
       setEditingConversation(null);
       setConversationNameDraft("");
-
     } catch (error) {
-
       setConversationActionError(
         error instanceof Error
           ? error.message
           : "Unable to rename conversation."
       );
-
     } finally {
-
       setIsSavingConversationName(false);
-
     }
 
   };
@@ -907,20 +1212,7 @@ function App() {
     }
 
     try {
-
-      const response = await fetch(
-        `${API_BASE_URL}/api/chat/conversations/${conversation.conversation_id}?user_id=1`,
-        {
-          method: "DELETE",
-        }
-      );
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null);
-        throw new Error(
-          data?.detail || "Unable to delete conversation."
-        );
-      }
+      await deleteConversationRequest(conversation.conversation_id);
 
       if (conversation.conversation_id === conversationId) {
         setConversationId(null);
@@ -931,20 +1223,18 @@ function App() {
         setOpenSourcesMessageIndex(null);
         setCopiedMessageIndex(null);
       }
+
       setPinnedConversationIds((previous) =>
         previous.filter((id) => id !== conversation.conversation_id)
       );
 
       await loadConversations();
-
     } catch (error) {
-
       setConversationActionError(
         error instanceof Error
           ? error.message
           : "Unable to delete conversation."
       );
-
     }
 
   };
@@ -1004,14 +1294,54 @@ function App() {
 
   };
 
+  const formatConversationTitle = (value) => {
+
+    let title = String(value || "")
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/[.!?]+$/, "");
+
+    if (!title) {
+      return "New conversation";
+    }
+
+    const imageRequest = /\b(?:generate|create|make|banao|bana(?:o)?|render)\b/i.test(title);
+
+    if (imageRequest) {
+      title = title.split(/,|\n/)[0].trim();
+      title = title
+        .replace(/^(?:ek|a|an|the)\s+/i, "")
+        .replace(/\b(?:generate|create|make|banao|bana|karo|kar do|karna hai)\b/gi, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    } else {
+      title = title
+        .replace(/^(?:mujhe|mere liye|main|mera|meri|i need|i want|please)\s+/i, "")
+        .replace(/^ek\s+/i, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    if (!title) {
+      return "New conversation";
+    }
+
+    if (title.length <= 48) {
+      return title;
+    }
+
+    const shortened = title.slice(0, 48).replace(/\s+\S*$/, "").trim();
+    return shortened || title.slice(0, 48).trim();
+  };
+
   const loadConversations = async () => {
 
     setIsLoadingConversations(true);
 
     try {
-
       const response = await fetch(
-        `${API_BASE_URL}/api/chat/conversations?user_id=1`
+        `${API_BASE_URL}/api/chat/conversations?user_id=1&limit=200`
       );
 
       if (!response.ok) {
@@ -1023,25 +1353,32 @@ function App() {
         ? data
         : data.conversations || [];
 
-      setConversations(
-        items.map((item) => ({
+      const normalizedItems = items.map((item) => {
+        const manualTitle = String(item.summary || "").trim();
+
+        return {
           conversation_id: item.conversation_id,
-          title: item.title || "New conversation",
+          title: manualTitle
+            ? manualTitle
+            : formatConversationTitle(item.title),
           started_at: item.started_at || null,
-          message_count: item.message_count || 0,
-          summary: item.summary || "",
-        }))
+          message_count: Number(item.message_count || 0),
+          summary: manualTitle,
+        };
+      });
+
+      setConversations(normalizedItems);
+      setConversationCount(
+        Number.isFinite(Number(data.total_count))
+          ? Number(data.total_count)
+          : normalizedItems.length
       );
-
     } catch (error) {
-
       console.warn("Conversation list unavailable:", error);
       setConversations([]);
-
+      setConversationCount(0);
     } finally {
-
       setIsLoadingConversations(false);
-
     }
 
   };
@@ -1051,28 +1388,7 @@ function App() {
     setIsLoadingHistory(true);
 
     try {
-
-      const query = new URLSearchParams({ user_id: "1" });
-
-      if (
-        requestedConversationId !== null &&
-        requestedConversationId !== undefined
-      ) {
-        query.set(
-          "conversation_id",
-          String(requestedConversationId)
-        );
-      }
-
-      const response = await fetch(
-        `${API_BASE_URL}/api/chat/history?${query.toString()}`
-      );
-
-      if (!response.ok) {
-        throw new Error("History load failed.");
-      }
-
-      const data = await response.json();
+      const data = await getConversationHistory(requestedConversationId);
 
       setConversationId(
         data.conversation_id ?? requestedConversationId ?? null
@@ -1090,30 +1406,46 @@ function App() {
           status: message.status || undefined,
         }))
       );
-      isNearBottomRef.current = true;
-      setIsNearBottom(true);
 
+      if (requestedConversationId !== null) {
+        restoreConversationScrollPosition(
+          data.conversation_id ?? requestedConversationId
+        );
+      } else {
+        isNearBottomRef.current = true;
+        setIsNearBottom(true);
+      }
     } catch (error) {
-
       console.error("History loading error:", error);
 
       if (requestedConversationId !== null) {
         setMessages([]);
       }
-
     } finally {
-
       setIsLoadingHistory(false);
-
+      setSwitchingConversationId(null);
+      setSwitchingConversationTitle("");
     }
 
   };
 
   const selectConversation = async (id) => {
 
-    if (isStreaming || id === conversationId) {
+    if (
+      isStreaming ||
+      id === conversationId ||
+      switchingConversationId !== null
+    ) {
       return;
     }
+
+    persistConversationScrollPosition();
+    setSwitchingConversationId(id);
+    setSwitchingConversationTitle(
+      conversations.find(
+        (conversation) => conversation.conversation_id === id
+      )?.title || "Conversation"
+    );
 
     setActiveView("chat");
     setIsSidebarOpen(false);
@@ -1150,19 +1482,7 @@ function App() {
     setIsNearBottom(true);
 
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/api/chat/conversations?user_id=1`,
-        { method: "POST" }
-      );
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => null);
-        throw new Error(
-          data?.detail || "Unable to create a new chat."
-        );
-      }
-
-      const data = await response.json();
+      const data = await createConversation();
       const newConversationId = data?.conversation_id ?? null;
 
       setConversationId(newConversationId);
@@ -1549,6 +1869,8 @@ function App() {
 
           ];
 
+          researchSourcesRef.current = nextSources;
+
           return {
 
             ...previous,
@@ -1634,6 +1956,47 @@ function App() {
       );
 
     };
+
+  const attachResearchSourcesToAssistantMessage = () => {
+
+    const sources = Array.isArray(researchSourcesRef.current)
+      ? researchSourcesRef.current
+      : [];
+
+    if (!sources.length) {
+      return;
+    }
+
+    setMessages((previous) => {
+      const lastIndex = previous.length - 1;
+      const lastMessage = previous[lastIndex];
+
+      if (lastMessage?.role !== "assistant") {
+        return previous;
+      }
+
+      const existingSources = Array.isArray(lastMessage.sources)
+        ? lastMessage.sources
+        : [];
+
+      const mergedSources = [...existingSources];
+
+      for (const source of sources) {
+        if (!source?.url) continue;
+        if (!mergedSources.some((item) => item?.url === source.url)) {
+          mergedSources.push(source);
+        }
+      }
+
+      return [
+        ...previous.slice(0, lastIndex),
+        {
+          ...lastMessage,
+          sources: mergedSources,
+        },
+      ];
+    });
+  };
 
   const handleServerEvent = (
 
@@ -1965,6 +2328,7 @@ function App() {
 
     ) {
 
+      attachResearchSourcesToAssistantMessage();
       finishAssistantMessage();
 
       if (
@@ -2059,6 +2423,40 @@ function App() {
     } catch (error) {
       console.error("Copy failed:", error);
     }
+  };
+
+  const getLastUserMessage = () =>
+    [...messages]
+      .reverse()
+      .find((message) => message?.role === "user" && message.content?.trim());
+
+  const retryLastFailedMessage = async () => {
+    if (isStreaming) return;
+
+    const lastUserMessage = getLastUserMessage();
+    if (!lastUserMessage) return;
+
+    setErrorMessage("");
+
+    setMessages((previous) => {
+      const lastIndex = previous.length - 1;
+      const last = previous[lastIndex];
+
+      if (last?.role === "assistant" && last.content?.startsWith("Sorry Ayan,")) {
+        return previous.slice(0, lastIndex);
+      }
+
+      return previous;
+    });
+
+    await streamMessage(lastUserMessage.content, {
+      appendUserMessage: false,
+      clearError: true,
+    });
+  };
+
+  const dismissError = () => {
+    setErrorMessage("");
   };
 
   const beginEditMessage = (index) => {
@@ -2166,137 +2564,66 @@ function App() {
       ]);
     }
 
+    try {
+      await streamChat({
+        userId: 1,
+        userName: "Ayan",
+        message,
+        conversationId,
+        newConversation: isStartingNewChat,
+        signal: controller.signal,
+        onEvent: handleServerEvent,
+      });
+
+      finishAssistantMessage();
+
       try {
-
-        const response = await fetch(
-          `${API_BASE_URL}/api/chat/stream`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "text/event-stream",
-            },
-            signal: controller.signal,
-            body: JSON.stringify({
-              user_id: 1,
-              user_name: "Ayan",
-              message,
-              conversation_id: conversationId,
-              new_conversation: isStartingNewChat,
-            }),
-          }
-        );
-
-        if (!response.ok) {
-          let errorMessage =
-            "Zoya AI service is temporarily unavailable.";
-
-          try {
-            const errorData = await response.json();
-            if (errorData?.detail) {
-              if (Array.isArray(errorData.detail)) {
-                errorMessage =
-                  errorData.detail[0]?.msg || errorMessage;
-              } else {
-                errorMessage = errorData.detail;
-              }
-            }
-          } catch {
-            // Keep default.
-          }
-
-          throw new Error(errorMessage);
-        }
-
-        if (!response.body) {
-          throw new Error(
-            "Streaming response is not supported by this browser."
-          );
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder("utf-8");
-        let buffer = "";
-        let streamCompleted = false;
-
-        while (!streamCompleted) {
-          const { value, done } = await reader.read();
-
-          if (done) {
-            break;
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-          const events = buffer.split("\n\n");
-          buffer = events.pop() || "";
-
-          for (const event of events) {
-            const result = handleServerEvent(event);
-            if (result === "done") {
-              streamCompleted = true;
-              break;
-            }
-          }
-        }
-
-        buffer += decoder.decode();
-        if (
-          buffer.trim() &&
-          !streamCompleted &&
-          !stopRequestedRef.current
-        ) {
-          handleServerEvent(buffer);
-        }
-
-        finishAssistantMessage();
-
-        try {
-          await refreshMemories();
-        } catch (error) {
-          console.error(
-            "Memory refresh after chat failed:",
-            error
-          );
-        }
-
-        await loadConversations();
-
+        await refreshMemories();
       } catch (error) {
-
-        const wasStopped =
-          stopRequestedRef.current ||
-          error?.name === "AbortError";
-
-        if (wasStopped) {
-          finishAssistantMessage();
-        } else {
-          const message =
-            error instanceof Error
-              ? error.message
-              : "Something went wrong.";
-
-          setErrorMessage(message);
-          setResearchState(createInitialResearchState());
-          setMessages((previous) => [
-            ...previous,
-            {
-              role: "assistant",
-              content: `Sorry Ayan, ${message}`,
-              timestamp: new Date().toISOString(),
-            },
-          ]);
-        }
-
-      } finally {
-
-        abortControllerRef.current = null;
-        stopRequestedRef.current = false;
-        setIsStartingNewChat(false);
-        setIsStreaming(false);
-
+        console.error(
+          "Memory refresh after chat failed:",
+          error
+        );
       }
 
-    };
+      await loadConversations();
+
+    } catch (error) {
+
+      const wasStopped =
+        stopRequestedRef.current ||
+        error?.name === "AbortError";
+
+      if (wasStopped) {
+        finishAssistantMessage();
+      } else {
+        const errorText =
+          error instanceof Error
+            ? error.message
+            : "Something went wrong.";
+
+        setErrorMessage(errorText);
+        setResearchState(createInitialResearchState());
+        setMessages((previous) => [
+          ...previous,
+          {
+            role: "assistant",
+            content: `Sorry Ayan, ${errorText}`,
+            timestamp: new Date().toISOString(),
+          },
+        ]);
+      }
+
+    } finally {
+
+      abortControllerRef.current = null;
+      stopRequestedRef.current = false;
+      setIsStartingNewChat(false);
+      setIsStreaming(false);
+
+    }
+
+  };
 
   const sendMessage = async () => {
     const message = input.trim();
@@ -2347,6 +2674,43 @@ function App() {
       }
 
     };
+
+
+  useKeyboardShortcuts({
+    chatSearchInputRef,
+    composerRef: textareaRef,
+    onEscape: () => {
+      if (chatSearch.trim()) {
+        setChatSearch("");
+        chatSearchInputRef.current?.blur();
+        return;
+      }
+
+      lastConversationMenuIdRef.current = openConversationMenu;
+      setOpenConversationMenu(null);
+      setOpenCitationUrl(null);
+      setOpenSourcesMessageIndex(null);
+      setIsSidebarOpen(false);
+
+      if (editingMessageIndex !== null) {
+        setEditingMessageIndex(null);
+        setInput("");
+      }
+
+      if (editingConversation !== null) {
+        setEditingConversation(null);
+        setConversationNameDraft("");
+      }
+
+      if (showCreateForm) {
+        setShowCreateForm(false);
+      }
+
+      if (editingMemory !== null) {
+        setEditingMemory(null);
+      }
+    },
+  });
 
   const handleMemoryCreate =
 
@@ -2493,6 +2857,7 @@ function App() {
         "memory"
 
       );
+      setIsSidebarOpen(false);
       setOpenConversationMenu(null);
 
       setErrorMessage("");
@@ -2522,6 +2887,7 @@ function App() {
         "chat"
 
       );
+      setIsSidebarOpen(false);
       setOpenConversationMenu(null);
 
       setMemoryActionError("");
@@ -2534,23 +2900,51 @@ function App() {
 
     messages.length === 0;
 
-  const showResearchActivity =
+  const starterPrompts = [
+    "Explain a concept in simple words",
+    "Help me write or debug code",
+    "Research a topic for me",
+    "Help me plan something",
+  ];
 
-    researchState.visible &&
+  const useStarterPrompt = (prompt) => {
+    setInput(prompt);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(prompt.length, prompt.length);
+    });
+  };
 
-    !researchState.completed &&
+  // Research status always wins. Thinking is deliberately opt-in for
+  // complex/explicitly slow requests so short chats do not feel heavy.
+  // Once assistant text starts streaming, the answer itself is the feedback.
+  const latestUserMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "user")?.content || "";
 
-    Boolean(
+  const shouldShowThinking = shouldShowThinkingForRequest(latestUserMessage);
 
-      researchState.status
-
-    ) &&
-
-    researchState.active;
+  const aiPhase =
+    !isStreaming
+      ? "idle"
+      : researchState.active
+        ? "researching"
+        : messages[messages.length - 1]?.role === "assistant"
+          ? "idle"
+          : !aiStatusVisible
+            ? "idle"
+            : shouldShowThinking
+              ? "thinking"
+              : "typing";
 
   return (
 
-    <div className={`app ${isSidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+    <>
+      <a className="skip-link" href="#zoya-main-content">
+        Skip to main content
+      </a>
+
+      <div className={`app ${isSidebarCollapsed ? "sidebar-collapsed" : ""}`}>
 
       <aside
         className={`sidebar ${isSidebarOpen ? "open" : ""}`}
@@ -2560,8 +2954,11 @@ function App() {
           <button
             type="button"
             className="sidebar-brand"
-            onClick={openChatView}
-            aria-label="Open Zoya chat"
+            onClick={() => {
+              setIsSidebarCollapsed(false);
+              openChatView();
+            }}
+            aria-label="Open Zoya chat and expand sidebar"
           >
             <span className="brand-avatar">Z</span>
             <span className="sidebar-brand-copy">
@@ -2571,20 +2968,22 @@ function App() {
           </button>
           <button
             type="button"
+            className="sidebar-collapse-button"
+            onClick={() => setIsSidebarCollapsed(true)}
+            aria-label="Collapse sidebar"
+            title="Collapse sidebar"
+          >
+            ‹
+          </button>
+          <button
+            type="button"
             className="sidebar-close"
             onClick={() => setIsSidebarOpen(false)}
             aria-label="Close sidebar"
           >
             ×
           </button>
-          <button
-            type="button"
-            className="sidebar-collapse-button"
-            onClick={() => setIsSidebarCollapsed((previous) => !previous)}
-            aria-label={isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          >
-            {isSidebarCollapsed ? "›" : "‹"}
-          </button>
+
         </div>
 
         <button
@@ -2597,19 +2996,25 @@ function App() {
           <span>New chat</span>
         </button>
 
-        <div className="sidebar-search-wrap">
+        <div className={`sidebar-search-wrap ${hasChatSearch ? "has-query" : ""}`}>
           <span className="sidebar-search-icon">⌕</span>
           <input
+            ref={chatSearchInputRef}
             value={chatSearch}
             onChange={(event) => setChatSearch(event.target.value)}
             placeholder="Search chats"
             aria-label="Search chats"
+            aria-controls="zoya-conversation-list"
+            aria-describedby="zoya-search-status"
           />
           {chatSearch && (
             <button
               type="button"
               className="sidebar-search-clear"
-              onClick={() => setChatSearch("")}
+              onClick={() => {
+                setChatSearch("");
+                chatSearchInputRef.current?.focus();
+              }}
               aria-label="Clear chat search"
             >
               ×
@@ -2617,9 +3022,17 @@ function App() {
           )}
         </div>
 
+        <div id="zoya-search-status" className="sidebar-search-status" aria-live="polite">
+          {hasChatSearch
+            ? `${filteredConversations.length} ${
+                filteredConversations.length === 1 ? "chat" : "chats"
+              } found`
+            : ""}
+        </div>
+
         <div className="sidebar-section-title">
           <span>Chats</span>
-          <span className="sidebar-count">{conversations.length}</span>
+          <span className="sidebar-count">{conversationCount}</span>
         </div>
 
         {conversationActionError && (
@@ -2676,7 +3089,18 @@ function App() {
           </div>
         )}
 
-        <div className="conversation-list">
+        <div
+          className="conversation-switch-live-status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {switchingConversationId !== null
+            ? `Loading ${switchingConversationTitle || "conversation"}`
+            : ""}
+        </div>
+
+        <div className="conversation-list" id="zoya-conversation-list">
           {isLoadingConversations ? (
             <div className="conversation-loading">
               <span className="conversation-skeleton" />
@@ -2684,10 +3108,36 @@ function App() {
               <span className="conversation-skeleton" />
             </div>
           ) : filteredConversations.length === 0 ? (
-            <div className="conversation-empty">
-              <span className="conversation-empty-icon">✦</span>
-              <strong>No saved chats yet</strong>
-              <span>Start a new conversation and it will appear here.</span>
+            <div className="conversation-empty search-empty">
+              <span className="conversation-empty-icon">⌕</span>
+              <strong>{hasChatSearch ? "No matching chats" : "No saved chats yet"}</strong>
+              <span>
+                {hasChatSearch
+                  ? `Nothing matches “${chatSearch.trim()}”.`
+                  : "Start a new conversation and it will appear here."}
+              </span>
+              {!hasChatSearch && (
+                <button
+                  type="button"
+                  className="conversation-empty-action"
+                  onClick={startNewChat}
+                  disabled={isStartingNewChat || isStreaming}
+                >
+                  {isStartingNewChat ? "Starting…" : "Start your first chat"}
+                </button>
+              )}
+              {hasChatSearch && (
+                <button
+                  type="button"
+                  className="conversation-empty-clear"
+                  onClick={() => {
+                    setChatSearch("");
+                    chatSearchInputRef.current?.focus();
+                  }}
+                >
+                  Clear search
+                </button>
+              )}
             </div>
           ) : (
             filteredConversations.map((conversation, index) => {
@@ -2734,56 +3184,88 @@ function App() {
                   onKeyDown={(event) =>
                     startRenameFromKey(event, conversation)
                   }
-                  disabled={isStreaming}
+                  disabled={isStreaming || switchingConversationId !== null}
+                  aria-current={
+                    conversation.conversation_id === conversationId
+                      ? "page"
+                      : undefined
+                  }
                 >
                   <span className="conversation-item-icon">{pinnedConversationIds.includes(conversation.conversation_id) ? "★" : "✦"}</span>
                   <span className="conversation-item-copy">
                     <span className="conversation-item-title">
-                      {conversation.title}
+                      {highlightConversationTitle(conversation.title, chatSearch)}
                     </span>
                     <span className="conversation-item-meta">
-                      {formatConversationDate(conversation.started_at)}
+                      {switchingConversationId === conversation.conversation_id
+                        ? "Loading…"
+                        : formatConversationDate(conversation.started_at)}
                     </span>
                   </span>
+
+                  {switchingConversationId === conversation.conversation_id && (
+                    <span
+                      className="conversation-switch-spinner"
+                      aria-hidden="true"
+                    />
+                  )}
                 </button>
 
                 <button
                   type="button"
                   className="conversation-item-menu-trigger"
+                  ref={(node) => {
+                    const id = conversation.conversation_id;
+                    if (node) {
+                      conversationMenuTriggerRefs.current.set(id, node);
+                    } else {
+                      conversationMenuTriggerRefs.current.delete(id);
+                    }
+                  }}
                   onClick={(event) =>
                     handleConversationMenuToggle(
                       event,
                       conversation.conversation_id
                     )
                   }
-                  disabled={isStreaming}
+                  disabled={isStreaming || switchingConversationId !== null}
                   aria-label={`Conversation actions for ${conversation.title}`}
+                  aria-haspopup="menu"
+                  aria-controls={`conversation-menu-${conversation.conversation_id}`}
                   aria-expanded={
                     openConversationMenu === conversation.conversation_id
                   }
+                  title="Conversation actions"
                 >
                   ⋯
                 </button>
 
                 {openConversationMenu === conversation.conversation_id && (
                   <div
+                    id={`conversation-menu-${conversation.conversation_id}`}
                     className="conversation-item-menu"
+                    role="menu"
+                    aria-label={`Actions for ${conversation.title}`}
                     onClick={(event) => event.stopPropagation()}
                   >
                     <button
                       type="button"
+                      role="menuitem"
+                      ref={conversationMenuFirstActionRef}
                       onClick={() => beginRenameConversation(conversation)}
                     >
                       Rename
                     </button>
                     <button
                       type="button"
+                      role="menuitem"
                       onClick={() => togglePinnedConversation(conversation.conversation_id)}
                     >
                       {pinnedConversationIds.includes(conversation.conversation_id) ? "Unpin" : "Pin"}
                     </button>
                     <button
                       type="button"
+                      role="menuitem"
                       className="danger"
                       onClick={() => deleteConversation(conversation)}
                     >
@@ -2805,6 +3287,7 @@ function App() {
               activeView === "chat" ? "active" : ""
             }`}
             onClick={openChatView}
+            aria-current={activeView === "chat" ? "page" : undefined}
           >
             <span>⌂</span> Chat
           </button>
@@ -2814,6 +3297,7 @@ function App() {
               activeView === "memory" ? "active" : ""
             }`}
             onClick={openMemoryView}
+            aria-current={activeView === "memory" ? "page" : undefined}
           >
             <span>◈</span> Memory
           </button>
@@ -2852,6 +3336,10 @@ function App() {
             </div>
           </div>
           <div className="topbar-right">
+            <ThemeSwitcher
+              theme={theme}
+              onThemeChange={setTheme}
+            />
           </div>
         </header>
 
@@ -2862,8 +3350,12 @@ function App() {
         <>
 
           <main
+            id="zoya-main-content"
             className="chat-container"
             ref={chatContainerRef}
+            tabIndex={-1}
+            aria-label="Chat with Zoya"
+            aria-busy={isLoadingHistory || isStreaming}
             onScroll={handleChatScroll}
             onMouseMove={handleSelectionMouseMove}
             onMouseUp={stopSelectionAutoScroll}
@@ -2888,21 +3380,30 @@ function App() {
 
                 <p>
 
-                  Main Zoya hoon,
-
-                  aapki personal AI
-
-                  assistant.
+                  Main Zoya hoon, aapki personal AI assistant.
 
                 </p>
 
                 <span>
 
-                  Aap mujhse kuch bhi
-
-                  pooch sakte hain.
+                  Start with a prompt below, ya seedha kuch bhi type karo.
 
                 </span>
+
+                <div className="welcome-eyebrow">QUICK START</div>
+
+                <div className="welcome-prompts" aria-label="Starter prompts">
+                  {starterPrompts.map((prompt) => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      className="welcome-prompt-button"
+                      onClick={() => useStarterPrompt(prompt)}
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
 
               </section>
 
@@ -2912,16 +3413,34 @@ function App() {
 
               {isLoadingHistory ? (
 
-                <div className="history-loading">
-
-                  <div className="loading-spinner"></div>
-
-                  <span>
-
-                    Loading conversation...
-
-                  </span>
-
+                <div
+                  className="history-loading-skeleton"
+                  aria-label="Loading conversation"
+                  role="status"
+                >
+                  <div className="history-skeleton-row assistant">
+                    <span className="history-skeleton-avatar" />
+                    <span className="history-skeleton-content">
+                      <span className="history-skeleton-meta" />
+                      <span className="history-skeleton-line wide" />
+                      <span className="history-skeleton-line medium" />
+                    </span>
+                  </div>
+                  <div className="history-skeleton-row user">
+                    <span className="history-skeleton-content">
+                      <span className="history-skeleton-meta short" />
+                      <span className="history-skeleton-line medium" />
+                    </span>
+                  </div>
+                  <div className="history-skeleton-row assistant">
+                    <span className="history-skeleton-avatar" />
+                    <span className="history-skeleton-content">
+                      <span className="history-skeleton-meta" />
+                      <span className="history-skeleton-line long" />
+                      <span className="history-skeleton-line wide" />
+                      <span className="history-skeleton-line short" />
+                    </span>
+                  </div>
                 </div>
 
               ) : (
@@ -2959,6 +3478,7 @@ function App() {
                                   onToggle={toggleCitation}
                                 />
                               ),
+                              pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
                             }}
                           >
                             {cleanDisplayedContent(message.content)}
@@ -3016,13 +3536,14 @@ function App() {
                         </div>
 
                         {message.role === "user" && !message.streaming && (
-                          <div className="message-actions user-message-actions">
+                          <div className="message-actions user-message-actions" aria-label="Message actions">
                             <button
                               type="button"
                               className="message-action-button icon-only"
                               onClick={() => beginEditMessage(index)}
                               aria-label="Edit message"
                               title="Edit"
+                              data-tooltip="Edit"
                               disabled={isStreaming}
                             >
                               ✎
@@ -3031,9 +3552,25 @@ function App() {
                         )}
 
                         {message.role === "assistant" && !message.streaming && (
-                          <div className="message-actions assistant-message-actions">
-                            <button type="button" className="message-action-button icon-only" onClick={() => retryAssistantMessage(index)} aria-label="Retry response" title="Retry">↻</button>
-                            <button type="button" className="message-action-button icon-only" onClick={() => copyMessage(message, index)} aria-label="Copy response" title={copiedMessageIndex === index ? "Copied" : "Copy"}>
+                          <div className="message-actions assistant-message-actions" aria-label="Message actions">
+                            <button
+                              type="button"
+                              className="message-action-button icon-only"
+                              onClick={() => retryAssistantMessage(index)}
+                              aria-label="Retry response"
+                              title="Retry"
+                              data-tooltip="Retry"
+                            >
+                              ↻
+                            </button>
+                            <button
+                              type="button"
+                              className="message-action-button icon-only"
+                              onClick={() => copyMessage(message, index)}
+                              aria-label={copiedMessageIndex === index ? "Copied response" : "Copy response"}
+                              title={copiedMessageIndex === index ? "Copied" : "Copy"}
+                              data-tooltip={copiedMessageIndex === index ? "Copied" : "Copy"}
+                            >
                               {copiedMessageIndex === index ? "✓" : "⧉"}
                             </button>
                             <button
@@ -3057,6 +3594,10 @@ function App() {
                           </div>
                         )}
 
+                        {message.role === "assistant" && copiedMessageIndex === index && (
+                          <span className="message-action-live-status" role="status" aria-live="polite">Copied response</span>
+                        )}
+
                         {message.role === "assistant" && openSourcesMessageIndex === index && sources.length > 0 && (
                           <div className="message-sources-panel">
                             <div className="message-sources-title">Sources</div>
@@ -3076,93 +3617,18 @@ function App() {
                   );
                 }))}
 
-              {showResearchActivity && (
-
-                <div className="research-activity">
-
-                  <div className="research-activity-main">
-
-                    <span className="research-spinner"></span>
-
-                    <div>
-
-                      <div className="research-activity-title">
-
-                        {
-
-                          researchState.status
-
-                        }
-
-                      </div>
-
-                      <div className="research-activity-detail">
-
-                        {
-
-                          researchState.detail
-
-                        }
-
-                      </div>
-
-                    </div>
-
-                  </div>
-
-                </div>
-
-              )}
-
-              {isStreaming &&
-
-                messages[
-
-                  messages.length -
-
-                    1
-
-                ]?.role ===
-
-                  "user" &&
-
-                !researchState.active && (
-
-                  <div className="message-row assistant">
-
-                    <div className="message-avatar">
-
-                      Z
-
-                    </div>
-
-                    <div className="message-content">
-
-                      <div className="message-meta">
-
-                        <span className="message-name">
-
-                          Zoya
-
-                        </span>
-
-                      </div>
-
-                      <div className="message-bubble typing">
-
-                        <span></span>
-
-                        <span></span>
-
-                        <span></span>
-
-                      </div>
-
-                    </div>
-
-                  </div>
-
-                )}
+              <div
+                className={`ai-status-shell ${
+                  aiPhase !== "idle" ? "visible" : ""
+                }`}
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                <AiStatusIndicator
+                  phase={aiPhase}
+                  researchState={researchState}
+                />
+              </div>
 
               <div
 
@@ -3178,6 +3644,19 @@ function App() {
 
           </main>
 
+          {!isNearBottom && messages.length > 0 && (
+            <button
+              type="button"
+              className="scroll-latest-button"
+              onClick={scrollToLatest}
+              aria-label="Jump to latest message"
+              title="Jump to latest message"
+            >
+              <span aria-hidden="true">↓</span>
+              <span>Latest</span>
+            </button>
+          )}
+
           <footer className="composer-wrapper">
 
             {editingMessageIndex !== null && (
@@ -3189,23 +3668,42 @@ function App() {
 
             {errorMessage && (
 
-              <div className="error-banner">
+              <div id="zoya-chat-error" className="error-banner" role="alert" aria-live="assertive">
 
-                <span>
+                <span className="error-banner-icon" aria-hidden="true">⚠️</span>
 
-                  ⚠️
+                <div className="error-banner-content">
 
-                </span>
+                  <strong>Something went wrong</strong>
 
-                <span>
+                  <span>{errorMessage}</span>
 
-                  {
+                </div>
 
-                    errorMessage
+                <div className="error-banner-actions">
 
-                  }
+                  {getLastUserMessage() && (
+                    <button
+                      type="button"
+                      className="error-banner-retry"
+                      onClick={retryLastFailedMessage}
+                      disabled={isStreaming}
+                    >
+                      Retry
+                    </button>
+                  )}
 
-                </span>
+                  <button
+                    type="button"
+                    className="error-banner-dismiss"
+                    onClick={dismissError}
+                    aria-label="Dismiss error"
+                    title="Dismiss"
+                  >
+                    ×
+                  </button>
+
+                </div>
 
               </div>
 
@@ -3269,6 +3767,8 @@ function App() {
 
                 }
 
+                aria-describedby={errorMessage ? "zoya-chat-error" : undefined}
+
               />
 
               <button
@@ -3298,6 +3798,13 @@ function App() {
                     ? "Stop response"
                     : "Send message"
                 }
+                title={
+                  isStreaming
+                    ? "Stop response"
+                    : canSend
+                      ? "Send message"
+                      : "Enter a message"
+                }
 
               >
 
@@ -3309,39 +3816,19 @@ function App() {
 
             </div>
 
-            <div
-
-              className={`composer-hint ${
-
-                isMessageTooLong
-
-                  ? "limit-warning"
-
-                  : ""
-
-              }`}
-
-            >
-
-              {isMessageTooLong
-
-                ? `Message is too long by ${Math.abs(
-
-                    remainingCharacters
-
-                  )} characters`
-
-                : `${input.length.toLocaleString()} / ${MAX_MESSAGE_LENGTH.toLocaleString()} characters · Enter to send · Shift + Enter for new line`}
-
-            </div>
-
           </footer>
 
         </>
 
       ) : (
 
-        <main className="memory-container">
+        <main
+          id="zoya-main-content"
+          className="memory-container"
+          tabIndex={-1}
+          aria-label="Zoya memory"
+          aria-busy={isLoadingMemories}
+        >
 
           <div className="memory-header">
 
@@ -3586,7 +4073,8 @@ function App() {
       )}
 
         </div>
-    </div>
+      </div>
+    </>
 
   );
 
