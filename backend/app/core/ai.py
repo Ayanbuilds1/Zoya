@@ -20,6 +20,7 @@ from app.config import (
     FREELLMAPI_API_KEY,
     FREELLMAPI_GATEWAY_COOLDOWN_SECONDS,
     FREELLMAPI_REQUEST_TIMEOUT_SECONDS,
+    FREELLMAPI_STREAM_REQUEST_TIMEOUT_SECONDS,
     GROQ_API_KEY,
     OPENAI_API_KEY,
     OPENROUTER_API_KEY,
@@ -349,9 +350,11 @@ class FailoverAIProvider(AIProvider):
     @staticmethod
     def _provider_timeout_seconds(provider: AIProvider) -> float:
         if isinstance(provider, FreeLLMAPIService):
+            # Streaming has its own timeout budget. Do not use the much
+            # longer normal-request timeout for the first streamed chunk.
             return max(
-                float(FREELLMAPI_REQUEST_TIMEOUT_SECONDS),
-                float(PROVIDER_REQUEST_TIMEOUT_SECONDS),
+                1.0,
+                float(FREELLMAPI_STREAM_REQUEST_TIMEOUT_SECONDS),
             )
         return float(PROVIDER_REQUEST_TIMEOUT_SECONDS)
 
@@ -427,6 +430,31 @@ class FailoverAIProvider(AIProvider):
         message: str,
         conversation_history: list[dict[str, str]] | None = None,
     ) -> str:
+        return self._send_message(
+            message,
+            conversation_history,
+            apply_cooldowns=True,
+        )
+
+    def send_reasoning_message(
+        self,
+        message: str,
+        conversation_history: list[dict[str, str]] | None = None,
+    ) -> str:
+        """Run a Brain-only request without changing final-answer cooldowns."""
+        return self._send_message(
+            message,
+            conversation_history,
+            apply_cooldowns=False,
+        )
+
+    def _send_message(
+        self,
+        message: str,
+        conversation_history: list[dict[str, str]] | None,
+        *,
+        apply_cooldowns: bool,
+    ) -> str:
         last_error: Exception | None = None
 
         for index, (name, provider) in enumerate(self.providers):
@@ -463,11 +491,12 @@ class FailoverAIProvider(AIProvider):
                 # unavailable. A reachable gateway must retain ownership of
                 # upstream routing decisions.
                 if error.kind == "gateway_unavailable":
-                    cooldown_seconds = self._set_gateway_cooldown(name)
-                    print(
-                        f"⏳ [AI] {name} gateway cooldown set for "
-                        f"{round(cooldown_seconds, 1)}s."
-                    )
+                    if apply_cooldowns:
+                        cooldown_seconds = self._set_gateway_cooldown(name)
+                        print(
+                            f"⏳ [AI] {name} gateway cooldown set for "
+                            f"{round(cooldown_seconds, 1)}s."
+                        )
 
                     if index < len(self.providers) - 1:
                         next_name = self.providers[index + 1][0]
@@ -493,15 +522,16 @@ class FailoverAIProvider(AIProvider):
                     f"({category}): {error}"
                 )
 
-                cooldown_seconds = self._set_failure_cooldown(
-                    name=name,
-                    category=category,
-                    error=error,
-                )
-                print(
-                    f"⏳ [AI] {name} cooldown set for "
-                    f"{round(cooldown_seconds, 1)}s."
-                )
+                if apply_cooldowns:
+                    cooldown_seconds = self._set_failure_cooldown(
+                        name=name,
+                        category=category,
+                        error=error,
+                    )
+                    print(
+                        f"⏳ [AI] {name} cooldown set for "
+                        f"{round(cooldown_seconds, 1)}s."
+                    )
 
                 if index < len(self.providers) - 1:
                     next_name = self.providers[index + 1][0]

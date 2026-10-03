@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from datetime import datetime
 
@@ -41,6 +41,10 @@ class BrainDecision:
     confidence: str
     used_conversation_context: bool
     response_plan: ResponsePlan
+    # Compatibility field used by the current chat orchestrator.
+    # False is the safe default: callers must not assume a fast-path turn
+    # unless it is explicitly marked as such.
+    fast_path: bool = False
     tool_needed: bool = False
     tool_name: str = ""
     tool_arguments: dict[str, Any] | None = None
@@ -231,6 +235,197 @@ class ZoyaBrain:
             "%Y-%m-%d %H:%M %Z"
         )
 
+    @classmethod
+    def _looks_like_current_information_request(
+        cls,
+        normalized: str,
+        conversation_history: list[dict[str, str]] | None = None,
+    ) -> bool:
+        """Return True only for an actual current-information request."""
+
+        text = cls._normalize(normalized or "")
+        history = conversation_history or []
+
+        if not text:
+            return False
+
+        # Explicit web/research/verification requests are always research.
+        if cls._contains_any(text, cls.RESEARCH_PATTERNS):
+            return True
+
+        freshness_terms = (
+            "latest",
+            "current",
+            "today",
+            "today's",
+            "recent",
+            "recently",
+            "currently",
+            "this week",
+            "this month",
+            "right now",
+            "aaj",
+            "abhi",
+            "now",
+        )
+
+        information_topics = (
+            "news",
+            "update",
+            "updates",
+            "price",
+            "prices",
+            "rate",
+            "rates",
+            "weather",
+            "mausam",
+            "score",
+            "scores",
+            "match",
+            "matches",
+            "result",
+            "results",
+            "status",
+            "availability",
+            "available",
+            "stock",
+            "market",
+            "traffic",
+            "flight",
+            "train",
+            "version",
+            "release",
+            "schedule",
+            "event",
+            "election",
+            "ticket",
+            "tickets",
+            "reservation",
+            "booking",
+        )
+
+        # "aaj ka match", "current price", "today's weather", etc.
+        if (
+            cls._contains_any(text, freshness_terms)
+            and cls._contains_any(text, information_topics)
+        ):
+            return True
+
+        direct_current_questions = (
+            "aaj kya hua",
+            "aaj ki news",
+            "aaj ki khabar",
+            "today what happened",
+            "what happened today",
+            "what is happening today",
+            "what's happening today",
+            "abhi kya chal raha",
+            "abhi kya ho raha",
+            "what is happening right now",
+            "what's happening right now",
+        )
+
+        if cls._contains_any(text, direct_current_questions):
+            return True
+
+        # Only specific short follow-ups inherit a previous topic.
+        short_current_followups = (
+            "aur abhi",
+            "abhi?",
+            "aur aaj",
+            "aaj?",
+            "today?",
+            "and today",
+            "and now",
+            "now?",
+            "currently?",
+            "abhi kya",
+            "aaj kya",
+        )
+
+        if history and len(text.split()) <= 8:
+            if cls._contains_any(text, short_current_followups):
+                previous = cls._last_substantive_user_message(history)
+                if previous:
+                    return True
+
+        return False
+
+    def should_use_ai_reasoning(
+        self,
+        message: str,
+        conversation_history: list[dict[str, str]] | None = None,
+        **_: Any,
+    ) -> bool:
+        """Return whether this turn deserves the semantic Brain LLM.
+
+        This compatibility method is intentionally conservative: obvious
+        low-complexity turns can take the fast path, while requests that
+        depend on context, research, corrections, planning, or tools use
+        semantic reasoning. It contains no entity-specific hardcoding.
+        """
+        normalized = self._normalize(message or "")
+        history = conversation_history or []
+
+        if not normalized:
+            return False
+
+        # Explicit research/current-information requests should always use
+        # semantic routing.
+        if self._contains_any(normalized, self.RESEARCH_PATTERNS):
+            return True
+        if self._looks_like_current_information_request(
+            normalized,
+            history,
+        ):
+            return True
+
+        # Complex answer shapes benefit from Brain planning.
+        if self._contains_any(normalized, self.DETAILED_PATTERNS):
+            return True
+        if self._contains_any(normalized, self.COMPARISON_PATTERNS):
+            return True
+        if self._contains_any(normalized, self.ROADMAP_PATTERNS):
+            return True
+        if self._contains_any(normalized, self.STEP_PATTERNS):
+            return True
+
+        # Corrections are semantically important even when the current
+        # turn is short or the history layer is temporarily empty.
+        if self._contains_any(normalized, self.CORRECTION_PATTERNS):
+            return True
+
+        if history and self._contains_any(
+            normalized,
+            (
+                "ye", "yeh", "woh", "usko", "uska", "uski",
+                "isme", "iska", "same", "upar wala", "previous",
+                "continue", "aur", "phir", "toh", "then", "also",
+            ),
+        ):
+            return True
+
+        # Obvious tool/creation language should reach semantic routing so the
+        # Brain can produce the structured tool decision.
+        if self._contains_any(
+            normalized,
+            (
+                "generate", "create", "make", "banao", "bana do",
+                "image", "picture", "photo", "thumbnail", "poster",
+                "presentation", "pptx", "spreadsheet", "xlsx",
+                "document", "docx", "pdf",
+            ),
+        ):
+            return True
+
+        # Longer or multi-part turns are more likely to benefit from semantic
+        # interpretation. Keep very short ordinary turns on the fast path.
+        words = normalized.split()
+        if len(words) > 18:
+            return True
+
+        return False
+
     async def analyze(
         self,
         message: str,
@@ -371,15 +566,9 @@ class ZoyaBrain:
             self.ROADMAP_PATTERNS,
         )
 
-        needs_current_information = (
-            self._contains_any(
-                normalized,
-                self.CURRENT_INFORMATION_PATTERNS,
-            )
-            or self._contains_any(
-                normalized,
-                self.RESEARCH_PATTERNS,
-            )
+        needs_current_information = self._looks_like_current_information_request(
+            normalized,
+            conversation_history,
         )
 
         needs_step_by_step = self._contains_any(
@@ -573,15 +762,92 @@ class ZoyaBrain:
                 "AI provider is not configured."
             )
 
+        reasoning_sender = getattr(
+            self.ai_provider,
+            "send_reasoning_message",
+            self.ai_provider.send_message,
+        )
+
         try:
-            return self.ai_provider.send_message(
+            return reasoning_sender(
                 prompt,
                 history,
             )
         except TypeError:
-            return self.ai_provider.send_message(
+            return reasoning_sender(
                 prompt
             )
+
+    def deterministic_decision(
+        self,
+        message: str,
+        conversation_history: list[dict[str, str]] | None = None,
+        fast_path: bool = False,
+    ) -> BrainDecision:
+        """
+        Deterministic Brain path for simple/high-confidence requests.
+
+        No semantic AI call is made here. Tool-specific deterministic
+        routing is still preserved before falling back to heuristics.
+        """
+        message = message.strip()
+
+        if not message:
+            raise ValueError("Message cannot be empty.")
+
+        history = self._compact_history(
+            conversation_history or [],
+            self.MAX_BRAIN_HISTORY_CHARS,
+        )
+
+        fallback = self._fallback_decision(
+            message=message,
+            conversation_history=history,
+        )
+
+        deterministic_tool = (
+            self._deterministic_image_generation_tool_decision(
+                message=message,
+                fallback=fallback,
+            )
+        )
+
+        if deterministic_tool is not None:
+            return replace(
+                deterministic_tool,
+                fast_path=fast_path,
+            )
+
+        deterministic_tool = (
+            self._deterministic_slides_read_tool_decision(
+                message=message,
+                fallback=fallback,
+            )
+        )
+
+        if deterministic_tool is not None:
+            return replace(
+                deterministic_tool,
+                fast_path=fast_path,
+            )
+
+        deterministic_tool = (
+            self._deterministic_spreadsheet_tool_decision(
+                message=message,
+                fallback=fallback,
+            )
+        )
+
+        if deterministic_tool is not None:
+            return replace(
+                deterministic_tool,
+                fast_path=fast_path,
+            )
+
+        return replace(
+            fallback,
+            fast_path=fast_path,
+        )
 
     def _fallback_decision(
         self,
@@ -610,9 +876,9 @@ class ZoyaBrain:
         )
         interpreted_request = message
         is_short_follow_up = self._is_short_follow_up(normalized)
-        is_current_follow_up = self._contains_any(
+        is_current_follow_up = self._looks_like_current_information_request(
             normalized,
-            self.CURRENT_INFORMATION_PATTERNS,
+            conversation_history,
         )
         is_research_only = self._is_research_only_message(normalized)
         research_query = ""
@@ -1341,58 +1607,13 @@ Return exactly this JSON shape:
             if isinstance(tool, dict) and tool.get("name")
         }
 
-        tool_argument_error = ""
-
-        if tool_needed:
-            selected_manifest = next(
-                (
-                    tool
-                    for tool in self.tool_catalog
-                    if isinstance(tool, dict)
-                    and str(tool.get("name", "")).strip() == tool_name
-                ),
-                None,
-            )
-
-            if selected_manifest is not None:
-                schema = selected_manifest.get("input_schema")
-                if isinstance(schema, dict):
-                    required = schema.get("required", [])
-                    if isinstance(required, (list, tuple)):
-                        missing = []
-                        for key in required:
-                            if key not in tool_arguments:
-                                missing.append(str(key))
-                                continue
-                            value = tool_arguments.get(key)
-                            if value is None:
-                                missing.append(str(key))
-                                continue
-                            if isinstance(value, str) and not value.strip():
-                                missing.append(str(key))
-
-                        if missing:
-                            tool_argument_error = (
-                                f"Required tool input missing: {', '.join(missing)}"
-                            )
-
-                    properties = schema.get("properties", {})
-                    if not tool_argument_error and isinstance(properties, dict):
-                        invalid_enum = None
-                        for key, spec in properties.items():
-                            if key not in tool_arguments or not isinstance(spec, dict):
-                                continue
-                            allowed = spec.get("enum")
-                            if isinstance(allowed, list) and tool_arguments[key] not in allowed:
-                                invalid_enum = (key, allowed)
-                                break
-
-                        if invalid_enum is not None:
-                            key, allowed = invalid_enum
-                            tool_argument_error = (
-                                f"Invalid value for {key}. Allowed values: "
-                                + ", ".join(str(item) for item in allowed)
-                            )
+        if tool_needed and (
+            not tool_name
+            or tool_name not in available_tool_names
+        ):
+            tool_needed = False
+            tool_name = ""
+            tool_arguments = {}
 
         if not tool_needed and intent == "tool":
             intent = fallback.intent
@@ -1416,15 +1637,13 @@ Return exactly this JSON shape:
         )
 
         current_scope_requested = (
-            self._contains_any(
+            self._looks_like_current_information_request(
                 normalized_interpreted,
-                self.CURRENT_INFORMATION_PATTERNS,
             )
-            or self._contains_any(
+            or self._looks_like_current_information_request(
                 self._normalize(
                     fallback.interpreted_request
                 ),
-                self.CURRENT_INFORMATION_PATTERNS,
             )
         )
 
@@ -1462,14 +1681,6 @@ Return exactly this JSON shape:
                 fallback.response_plan.needs_step_by_step,
             )
         )
-
-        if tool_argument_error and tool_needed:
-            needs_clarification = True
-            clarification_question = (
-                "Tool action complete karne ke liye "
-                + tool_argument_error
-                + "."
-            )
 
         if needs_clarification:
             research_needed = False

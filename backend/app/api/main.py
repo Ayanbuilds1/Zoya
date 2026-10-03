@@ -1,4 +1,6 @@
+﻿from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
 import mimetypes
 
 from fastapi import FastAPI, HTTPException
@@ -7,14 +9,26 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.api.dependencies import chat_service
+from app.runtime.freellmapi_manager import freellmapi_manager
 from app.api.routes.chat import router as chat_router
 from app.api.routes.memory import router as memory_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Ensure the local FreeLLMAPI gateway exists before Zoya serves requests."""
+    await asyncio.to_thread(freellmapi_manager.start)
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(freellmapi_manager.stop)
 
 
 app = FastAPI(
     title="Zoya API",
     description="Backend API for Zoya Personal AI Assistant.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 

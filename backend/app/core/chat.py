@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -223,6 +225,17 @@ class ZoyaChatService:
         compacted_reversed.reverse()
 
         return compacted_reversed
+
+    @staticmethod
+    def _provider_history_for_final_answer(
+        conversation_history: list[dict[str, str]],
+        brain_decision: BrainDecision,
+    ) -> list[dict[str, str]]:
+        """Include prior turns only when the Brain resolved this turn from them."""
+        if not brain_decision.used_conversation_context:
+            return []
+
+        return conversation_history
 
     def _persist_nlp_preferences(
         self,
@@ -999,6 +1012,71 @@ class ZoyaChatService:
                 preference_decision,
             )
 
+        # High-confidence conversation recall is local and deterministic.
+        # Never send a "what did I just say?" request to web research or the
+        # semantic Brain when the previous user message is directly available.
+        recall_response = self._resolve_conversation_recall(
+            message=message,
+            conversation_history=full_conversation_history,
+        )
+        if recall_response is not None:
+            recall_decision = self.brain.deterministic_decision(
+                message=message,
+                conversation_history=full_conversation_history,
+                fast_path=True,
+            )
+            recall_decision = replace(
+                recall_decision,
+                intent="conversation_recall",
+                research_needed=False,
+                research_query="",
+                needs_clarification=False,
+                clarification_question="",
+                used_conversation_context=bool(full_conversation_history),
+                fast_path=False,
+            )
+            return (
+                conversation_id,
+                message,
+                self._compact_history(
+                    focused_history,
+                    self.MAX_HISTORY_CONTEXT_CHARS,
+                ),
+                recall_response,
+                recall_decision,
+            )
+
+        # Current date/time is a deterministic system fact. Answer it from the
+        # runtime clock; never send it to research, the semantic Brain, or an
+        # LLM (a model cannot know today's date and will invent a stale one).
+        datetime_response = self._resolve_local_datetime(message)
+        if datetime_response is not None:
+            datetime_decision = self.brain.deterministic_decision(
+                message=message,
+                conversation_history=full_conversation_history,
+                fast_path=True,
+            )
+            datetime_decision = replace(
+                datetime_decision,
+                intent="local_datetime",
+                research_needed=False,
+                research_query="",
+                needs_clarification=False,
+                clarification_question="",
+                used_conversation_context=False,
+                fast_path=False,
+            )
+            return (
+                conversation_id,
+                message,
+                self._compact_history(
+                    focused_history,
+                    self.MAX_HISTORY_CONTEXT_CHARS,
+                ),
+                datetime_response,
+                datetime_decision,
+            )
+
         # Deterministic conversational-state answers take precedence when the
         # state is unambiguous. Rebuild from persisted history as a safety net
         # so the answer does not depend on an in-memory tracker surviving turns.
@@ -1008,7 +1086,11 @@ class ZoyaChatService:
         )
         if state_response is None:
             state_response = self.state_tracker.resolve(message, conversation_state)
-        if state_response is None:
+        # Only run the deterministic correction acknowledgement when local NLP
+        # has positively identified this turn as a correction. A short ordinary
+        # conversational reply such as "nahi yaar" must remain a normal
+        # conversational turn and should not receive a correction acknowledgement.
+        if state_response is None and nlp_features.is_correction:
             state_response = self.state_tracker.acknowledge_correction(
                 message,
                 conversation_state,
@@ -1231,6 +1313,112 @@ class ZoyaChatService:
 
         return image
 
+    @staticmethod
+    def _resolve_conversation_recall(
+        message: str,
+        conversation_history: list[dict[str, str]],
+    ) -> str | None:
+        """Resolve high-confidence requests to recall the user's recent message."""
+        normalized = " ".join(message.lower().strip().split())
+        normalized = re.sub(r"[^a-z0-9? ]+", " ", normalized)
+        normalized = " ".join(normalized.split())
+
+        patterns = (
+            r"\bmaine(?: abhi)? kya (?:bataya|bola|kaha|likha)\b",
+            r"\babhi maine kya (?:bataya|bola|kaha|likha)\b",
+            r"\bmaine kya (?:bataya|bola|kaha|likha) tha\b",
+            r"\bmera (?:last|latest|pichla) message kya tha\b",
+            r"\bmeri (?:last|latest|pichli) baat kya thi\b",
+            r"\bmaine (?:abhi )?(?:kya bola tha|kya kaha tha|kya bataya tha)\b",
+            r"\bwhat did i (?:just )?(?:say|tell you|write)\b",
+            r"\bwhat was (?:my|the) (?:last|latest) message\b",
+            r"\bwhat was the last thing i (?:said|told you|wrote)\b",
+        )
+
+        if not any(
+            re.search(pattern, normalized)
+            for pattern in patterns
+        ):
+            return None
+
+        for item in reversed(conversation_history):
+            if item.get("role") != "user":
+                continue
+
+            content = item.get("content")
+            if not isinstance(content, str):
+                continue
+
+            content = content.strip()
+            if not content:
+                continue
+
+            return f'Tumne abhi bataya tha: "{content}"'
+
+        return "Abhi tak tumhara koi pichla message nahi hai."
+
+    _WEEKDAYS = (
+        "Monday", "Tuesday", "Wednesday", "Thursday",
+        "Friday", "Saturday", "Sunday",
+    )
+    _MONTHS = (
+        "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December",
+    )
+
+    # Patterns run on text normalized like the recall helper: lowercase, only
+    # [a-z0-9? ] kept (so "today's" becomes "today s"), whole message anchored.
+    # A bare "aaj"/"today"/"date" never matches, so ordinary sentences such as
+    # "aaj meri friend ka birthday hai" or "aaj ki news kya hai" are untouched.
+    _DATE_WORD = r"(?:date|tarikh|tareekh|tithi)"
+    _IS = r"(?: hai| h| he)"
+    _DATE_PATTERNS = (
+        rf"(?:aaj|aj|abhi) (?:ki|ka|ke) {_DATE_WORD}(?: kya)?{_IS}?",
+        rf"(?:aaj|aj) kya {_DATE_WORD}{_IS}",
+        rf"(?:aaj|aj) (?:kaun ?si|kon ?si|konsi|kk?o?si) {_DATE_WORD}{_IS}",
+        rf"(?:aaj|aj) (?:kaun ?sa|kon ?sa|konsa) (?:din|day){_IS}",
+        rf"(?:aaj|aj) (?:kya|kaun ?sa|konsa) (?:din|day){_IS}",
+        rf"(?:what(?: is| s)?|whats|tell me) (?:the )?(?:today s |todays |current )?{_DATE_WORD}(?: today| now)?",
+        rf"(?:today s|todays|current) {_DATE_WORD}",
+        r"what day is (?:it|today)(?: today)?",
+        r"what s the day today",
+    )
+    _TIME_PATTERNS = (
+        rf"(?:abhi |ab )?kitne baje(?: hain| hai| h| he)?",
+        r"(?:abhi |ab |current )?(?:time|samay) kya (?:hai|h|he|hua hai|hua)",
+        r"(?:what(?: is| s)?|whats|tell me) (?:the )?(?:current )?time(?: now| right now)?",
+        r"what time is it(?: now| right now)?",
+        r"(?:current time(?: now)?|time now)",
+    )
+
+    @classmethod
+    def _resolve_local_datetime(cls, message: str) -> str | None:
+        """Answer plain date/time questions from the runtime clock.
+
+        Returns None for anything that is not a direct date/time question so
+        the normal routing (fast path, Brain, research) is unchanged.
+        """
+        normalized = " ".join(message.lower().strip().split())
+        normalized = re.sub(r"[^a-z0-9? ]+", " ", normalized)
+        normalized = " ".join(normalized.split()).rstrip("? ").strip()
+
+        if not normalized or len(normalized) > 60:
+            return None
+
+        now = datetime.now().astimezone()
+
+        if any(re.fullmatch(p, normalized) for p in cls._DATE_PATTERNS):
+            return (
+                f"Aaj {now.day} {cls._MONTHS[now.month - 1]} {now.year}, "
+                f"{cls._WEEKDAYS[now.weekday()]} hai."
+            )
+
+        if any(re.fullmatch(p, normalized) for p in cls._TIME_PATTERNS):
+            clock = now.strftime("%I:%M %p").lstrip("0")
+            return f"Abhi samay {clock} hai."
+
+        return None
+
     def _build_contextual_message(
         self,
         brain_decision: BrainDecision,
@@ -1293,12 +1481,6 @@ class ZoyaChatService:
             else "(No directly relevant deterministic conversation state.)"
         )
 
-        brain_instruction = (
-            self.brain.build_reasoning_instruction(
-                brain_decision
-            )
-        )
-
         response_instruction = (
             self.brain.build_instruction(
                 brain_decision.response_plan
@@ -1315,8 +1497,6 @@ class ZoyaChatService:
             )
 
         parts = [
-            brain_instruction,
-            "",
             response_instruction,
             "",
             "USER RESPONSE PREFERENCES (follow these unless the current message explicitly overrides them):",
@@ -1518,10 +1698,9 @@ class ZoyaChatService:
                 )
             )
 
-            provider_history = (
-                []
-                if brain_decision.fast_path
-                else conversation_history
+            provider_history = self._provider_history_for_final_answer(
+                conversation_history,
+                brain_decision,
             )
 
             reply = await asyncio.to_thread(
@@ -1831,10 +2010,9 @@ class ZoyaChatService:
 
         def produce() -> None:
             try:
-                provider_history = (
-                    []
-                    if brain_decision.fast_path
-                    else conversation_history
+                provider_history = self._provider_history_for_final_answer(
+                    conversation_history,
+                    brain_decision,
                 )
 
                 for chunk in self.ai.stream_message(
@@ -1867,6 +2045,12 @@ class ZoyaChatService:
 
         chunks: list[str] = []
 
+        # Forward provider chunks to the client as they arrive so the user's
+        # time-to-first-token is the provider's TTFT, not its total completion
+        # time. Set ZOYA_STREAM_LIVE=0 to restore the old buffer-then-send path.
+        live_stream = os.getenv("ZOYA_STREAM_LIVE", "1") != "0"
+        streamed_live = False
+
         try:
             while True:
                 item = await queue.get()
@@ -1882,12 +2066,23 @@ class ZoyaChatService:
 
                 chunks.append(item)
 
+                if live_stream and item:
+                    streamed_live = True
+                    yield {
+                        "event": "chunk",
+                        "data": {
+                            "content": item,
+                        },
+                    }
+
         finally:
             await producer_task
 
-        reply = "".join(
+        raw_reply = "".join(
             chunks
         ).strip()
+
+        reply = raw_reply
 
         reply = sanitize_response(
             reply,
@@ -1897,18 +2092,28 @@ class ZoyaChatService:
             user_message=current_message,
         )
 
-        if reply:
+        if not reply:
+            raise RuntimeError(
+                "Zoya returned an empty streamed response."
+            )
+
+        if not streamed_live:
             yield {
                 "event": "chunk",
                 "data": {
                     "content": reply,
                 },
             }
-
-        if not reply:
-            raise RuntimeError(
-                "Zoya returned an empty streamed response."
-            )
+        elif reply != raw_reply:
+            # The response guard changed the text after it was already shown.
+            # Tell the client to swap in the sanitized version (the saved
+            # message is always the sanitized one).
+            yield {
+                "event": "replace",
+                "data": {
+                    "content": reply,
+                },
+            }
 
         self.memory.save_message(
             conversation_id=conversation_id,

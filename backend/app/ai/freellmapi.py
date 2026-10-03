@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections.abc import Iterator
 import time
@@ -116,15 +116,34 @@ class FreeLLMAPIService(AIProvider):
     def _classify_error(
         cls,
         error: Exception,
+        *,
+        response_headers: dict[str, str] | None = None,
+        response_status_code: int | None = None,
     ) -> tuple[str, int | None, dict[str, str]]:
         headers = cls._headers_from_error(error)
+        if response_headers:
+            headers.update(
+                {
+                    str(key).lower(): str(value)
+                    for key, value in response_headers.items()
+                }
+            )
         body = cls._body_from_error(error).lower()
-        status_code = getattr(error, "status_code", None)
+        status_code = (
+            response_status_code
+            if response_status_code is not None
+            else getattr(error, "status_code", None)
+        )
 
         if isinstance(
             error,
             (APIConnectionError, APITimeoutError, TimeoutError),
         ):
+            # A timed-out SSE body read happens after the gateway has already
+            # accepted the request. Do not mistake a slow routed model for a
+            # gateway outage and bypass FreeLLMAPI to a direct provider.
+            if status_code is not None and 200 <= status_code < 300:
+                return "upstream_failed", status_code, headers
             return "gateway_unavailable", status_code, headers
 
         combined = " ".join(
@@ -221,9 +240,16 @@ class FreeLLMAPIService(AIProvider):
     def _raise_classified(
         self,
         error: Exception,
+        *,
+        response_headers: dict[str, str] | None = None,
+        response_status_code: int | None = None,
     ) -> None:
         kind, status_code, headers = (
-            self._classify_error(error)
+            self._classify_error(
+                error,
+                response_headers=response_headers,
+                response_status_code=response_status_code,
+            )
         )
         detail = self._body_from_error(error)
 
@@ -356,9 +382,14 @@ class FreeLLMAPIService(AIProvider):
 
             return
 
+        response_headers: dict[str, str] = {}
+        response_status_code: int | None = None
+
         try:
+            # Native SSE uses the dedicated streaming client so its
+            # shorter streaming timeout also bounds pre-first-token stalls.
             stream = (
-                self.client.chat.completions.create(
+                self.stream_client.chat.completions.create(
                     model=FREELLMAPI_CHAT_MODEL,
                     messages=build_chat_messages(
                         message,
@@ -368,6 +399,32 @@ class FreeLLMAPIService(AIProvider):
                     stream=True,
                 )
             )
+
+            response = getattr(stream, "response", None)
+            raw_headers = getattr(response, "headers", None)
+            if raw_headers is not None:
+                response_headers = {
+                    str(key).lower(): str(value)
+                    for key, value in raw_headers.items()
+                }
+            response_status_code = getattr(
+                response,
+                "status_code",
+                None,
+            )
+            self.last_route_metadata = self._route_metadata(
+                response_headers
+            )
+            safe_metadata = {
+                key: self.last_route_metadata[key]
+                for key in ("x-routed-via", "x-fallback-attempts")
+                if key in self.last_route_metadata
+            }
+            if safe_metadata:
+                print(
+                    "[FREELLMAPI] route metadata: "
+                    f"{safe_metadata}"
+                )
 
             emitted_text = False
 
@@ -408,5 +465,9 @@ class FreeLLMAPIService(AIProvider):
                 )
 
         except Exception as error:
-            self._raise_classified(error)
+            self._raise_classified(
+                error,
+                response_headers=response_headers,
+                response_status_code=response_status_code,
+            )
             raise AssertionError("unreachable")
