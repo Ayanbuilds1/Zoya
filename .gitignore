@@ -7,3 +7,20 @@ test_*.py
 backend/zoya.db
 node_modules/
 generated_images/
+
+# Local backups
+*.bak
+
+# Local logs
+*.log
+
+# Temporary debug/probe files
+body.json
+models.json
+nvidia_body.json
+latency_probe.py
+backend/zoya_direct_gateway_probe.py
+backend/zoya_internal_timing_probe.py
+
+# Runtime-generated files
+backend/app/runtime/
